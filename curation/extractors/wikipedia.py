@@ -6,29 +6,47 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import urllib.parse
 import urllib.error
 import urllib.request
 from html import unescape
 
+from curation.config import (
+    INDIC_WIKIPEDIA_MAIN_PAGE_TITLES,
+    WIKIPEDIA_MAIN_PAGE_TITLES_UNIVERSAL,
+)
+
 logger = logging.getLogger(__name__)
 
 _WIKI_HOST_RE = re.compile(r"^([a-z-]+)\.wikipedia\.org$", re.IGNORECASE)
-_MAIN_PAGE_TITLES = frozenset(
-    {
-        "main page",
-        "முதற்பக்கம்",
-        "முதற் பக்கம்",
-        "మొదటి పేజీ",
-        "మొదటిపేజీ",
-        "मुखपृष्ठ",
-        "पृष्ठ प्रधान",
-        "প্রধান পাতা",
-        "page d'accueil",
-        "hauptseite",
-        "pagina principale",
-    }
-)
+_HTML_CACHE: dict[tuple[str, str], str] = {}
+_last_wiki_request_at: float = 0.0
+_wiki_request_interval: float = 2.5
+_wiki_429_backoff: float = 0.0  # extra pause after rate-limit errors
+
+
+def configure_wiki_rate_limit(
+    *,
+    min_interval: float = 2.5,
+) -> None:
+    """Set minimum spacing between Wikipedia API requests for this process."""
+    global _wiki_request_interval
+    _wiki_request_interval = max(0.0, min_interval)
+
+
+def clear_wiki_html_cache() -> None:
+    """Clear cached Wikipedia HTML (e.g. between separate pipeline runs)."""
+    _HTML_CACHE.clear()
+
+
+def is_wiki_html_cached(url: str) -> bool:
+    try:
+        lang, title = _parse_wikipedia_url(url)
+    except ValueError:
+        return False
+    return (lang, title) in _HTML_CACHE
+
 
 # Boilerplate blocks common on Wikipedia main pages and footers.
 _BOILERPLATE_RES = [
@@ -58,13 +76,15 @@ def extract_text_from_wikipedia(
     """
     wiki_lang, title = _parse_wikipedia_url(url)
 
-    html = _fetch_parse_html(wiki_lang, title, timeout=timeout)
-    is_main = _is_main_page(title) or _html_is_main_page_layout(html)
+    html, canonical_title = _fetch_parse_html(wiki_lang, title, timeout=timeout)
+    is_main = _is_main_page(canonical_title, wiki_lang) or _html_is_main_page_layout(
+        html, wiki_lang=wiki_lang, title=canonical_title
+    )
     if is_main:
         logger.info(
             "Wikipedia main page detected (%r). Extracting featured sections "
             "and linked articles from layout tables.",
-            title,
+            canonical_title,
         )
 
     paragraphs = _paragraphs_from_html(html, is_main_page=is_main)
@@ -83,14 +103,104 @@ def discover_wikipedia_article_links(
     max_links: int = 25,
 ) -> list[str]:
     """
-    Discover article links from a Wikipedia page.
+    Discover internal ``/wiki/`` article links from any Wikipedia page.
 
-    For main pages, links are extracted from ``MainPageBG`` content cells.
-    For normal article pages, links are extracted from the article body.
+    Links are taken from the article body (paragraphs and lists), not from
+    site-wide navigation headers. Main/portal pages also scan ``MainPageBG``
+    feature tables.
     """
     wiki_lang, title = _parse_wikipedia_url(url)
-    html = _fetch_parse_html(wiki_lang, title, timeout=timeout)
+    html, canonical_title = _fetch_parse_html(wiki_lang, title, timeout=timeout)
+    return _discover_links_from_html(
+        html,
+        wiki_lang=wiki_lang,
+        title=canonical_title,
+        max_links=max_links,
+    )
 
+
+def crawl_wikipedia_urls(
+    seed_urls: list[str],
+    *,
+    crawl_depth: int = 2,
+    max_pages: int = 150,
+    links_per_page: int = 40,
+    timeout: int = 30,
+) -> list[str]:
+    """
+    Breadth-first crawl of Wikipedia article URLs starting from seed pages.
+
+    Depth 0 = seeds only. Depth 1 = seeds + links found on seeds. Depth 2 =
+    also pages linked from those articles, and so on. Only follows ``/wiki/``
+    links in the same language wiki as each page.
+    """
+    if crawl_depth <= 0:
+        return _dedupe_urls(seed_urls)
+
+    unlimited_pages = max_pages <= 0
+    ordered: list[str] = []
+    seen: set[str] = set()
+    current_level = _dedupe_urls(seed_urls)
+
+    for depth in range(crawl_depth + 1):
+        next_level: list[str] = []
+        for url in current_level:
+            if not unlimited_pages and len(ordered) >= max_pages:
+                break
+            if url not in seen:
+                seen.add(url)
+                ordered.append(url)
+
+            if depth >= crawl_depth or (
+                not unlimited_pages and len(ordered) >= max_pages
+            ):
+                continue
+
+            try:
+                wiki_lang, title = _parse_wikipedia_url(url)
+                html, canonical_title = _fetch_parse_html(
+                    wiki_lang, title, timeout=timeout
+                )
+                discovered = _discover_links_from_html(
+                    html,
+                    wiki_lang=wiki_lang,
+                    title=canonical_title,
+                    max_links=links_per_page,
+                )
+            except Exception:
+                logger.exception("Failed discovering links at depth %s from %s", depth, url)
+                continue
+
+            for link in discovered:
+                if link in seen or link in next_level:
+                    continue
+                if not unlimited_pages and len(ordered) + len(next_level) >= max_pages:
+                    break
+                next_level.append(link)
+
+            logger.info(
+                "Crawl depth %s: found %s links from %s",
+                depth,
+                len(discovered),
+                url,
+            )
+
+        if not next_level:
+            break
+        current_level = next_level
+
+    if unlimited_pages:
+        return ordered
+    return ordered[:max_pages]
+
+
+def _discover_links_from_html(
+    html: str,
+    *,
+    wiki_lang: str,
+    title: str,
+    max_links: int,
+) -> list[str]:
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
@@ -100,19 +210,54 @@ def discover_wikipedia_article_links(
     if root is None:
         return []
 
-    is_main = _is_main_page(title) or _html_is_main_page_layout(html)
-    if is_main:
-        containers = root.select("td.MainPageBG, td#mp-left, td#mp-right")
-        if not containers:
-            containers = root.select("table.mainpage")
-    else:
-        _strip_non_content(root)
-        containers = [root]
+    links: list[str] = []
+    seen: set[str] = set()
 
-    links = _extract_article_links(containers, wiki_lang=wiki_lang)
+    is_main = _is_main_page(title, wiki_lang) or _html_is_main_page_layout(
+        html, wiki_lang=wiki_lang, title=title
+    )
+    if is_main:
+        for container in root.select("td.MainPageBG, td#mp-left, td#mp-right, table.mainpage"):
+            links.extend(
+                _extract_article_links([container], wiki_lang=wiki_lang, seen=seen)
+            )
+        for block in root.select("p, li, dd, h2, h3, h4"):
+            if block.find_parent([".navbox", ".infobox", ".reflist", ".metadata"]):
+                continue
+            links.extend(
+                _extract_article_links([block], wiki_lang=wiki_lang, seen=seen)
+            )
+    else:
+        content_root = BeautifulSoup(str(root), "lxml").select_one(".mw-parser-output") or root
+        _strip_non_content(content_root)
+        blocks = content_root.select("p, li, dd, h2, h3, h4")
+        if blocks:
+            for block in blocks:
+                if block.find_parent(["table", ".navbox", ".infobox", ".reflist"]):
+                    continue
+                links.extend(
+                    _extract_article_links([block], wiki_lang=wiki_lang, seen=seen)
+                )
+        else:
+            links.extend(
+                _extract_article_links([content_root], wiki_lang=wiki_lang, seen=seen)
+            )
+
     if max_links > 0:
-        links = links[:max_links]
+        return links[:max_links]
     return links
+
+
+def _dedupe_urls(urls: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        url = raw.strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        unique.append(url)
+    return unique
 
 
 def _title_from_path(path: str) -> str | None:
@@ -135,7 +280,29 @@ def _parse_wikipedia_url(url: str) -> tuple[str, str]:
     return match.group(1), title
 
 
-def _fetch_parse_html(lang: str, title: str, *, timeout: int) -> str:
+def _throttle_wiki_request() -> None:
+    """Enforce minimum interval between API calls; honor post-429 backoff."""
+    global _last_wiki_request_at, _wiki_429_backoff
+
+    if _wiki_429_backoff > 0:
+        logger.info("Waiting %.1fs after rate limit before next request", _wiki_429_backoff)
+        time.sleep(_wiki_429_backoff)
+        _wiki_429_backoff = 0.0
+
+    if _wiki_request_interval <= 0:
+        return
+
+    elapsed = time.monotonic() - _last_wiki_request_at
+    if elapsed < _wiki_request_interval:
+        time.sleep(_wiki_request_interval - elapsed)
+    _last_wiki_request_at = time.monotonic()
+
+
+def _fetch_parse_html(lang: str, title: str, *, timeout: int) -> tuple[str, str]:
+    cache_key = (lang, _normalize_wiki_title(title))
+    if cache_key in _HTML_CACHE:
+        return _HTML_CACHE[cache_key], cache_key[1]
+
     params = urllib.parse.urlencode(
         {
             "action": "parse",
@@ -143,29 +310,51 @@ def _fetch_parse_html(lang: str, title: str, *, timeout: int) -> str:
             "prop": "text",
             "format": "json",
             "disabletoc": "1",
+            "redirects": "1",
         }
     )
     api_url = f"https://{lang}.wikipedia.org/w/api.php?{params}"
     request = urllib.request.Request(
         api_url,
-        headers={"User-Agent": "data-curation-pipeline/1.0 (research use)"},
+        headers={
+            "User-Agent": (
+                "data-curation-pipeline/1.0 "
+                "(https://github.com/karya; research dataset builder)"
+            )
+        },
     )
+
+    max_attempts = 8
     payload = None
-    for attempt in range(3):
+    for attempt in range(max_attempts):
+        _throttle_wiki_request()
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.load(response)
             break
         except urllib.error.HTTPError as exc:
-            if exc.code != 429 or attempt == 2:
+            if exc.code != 429:
                 raise
-            sleep_s = 2.0 * (attempt + 1)
+            retry_after = 0.0
+            if exc.headers and exc.headers.get("Retry-After"):
+                try:
+                    retry_after = float(exc.headers.get("Retry-After", 0))
+                except ValueError:
+                    retry_after = 0.0
+            sleep_s = max(retry_after, min(120.0, 8.0 * (2**attempt)))
+            global _wiki_429_backoff
+            _wiki_429_backoff = max(_wiki_429_backoff, sleep_s * 0.5)
+            if attempt == max_attempts - 1:
+                raise
             logger.warning(
-                "Wikipedia API throttled (429) for '%s'. Retrying in %.1fs...",
+                "Wikipedia API throttled (429) for '%s'. Retry %s/%s in %.0fs...",
                 title,
+                attempt + 1,
+                max_attempts,
                 sleep_s,
             )
             time.sleep(sleep_s)
+
     if payload is None:
         raise RuntimeError("Failed to fetch Wikipedia API payload")
 
@@ -174,27 +363,80 @@ def _fetch_parse_html(lang: str, title: str, *, timeout: int) -> str:
         info = payload["error"].get("info", "")
         raise RuntimeError(f"Wikipedia API error ({code}): {info}")
 
-    return payload["parse"]["text"]["*"]
+    html = payload["parse"]["text"]["*"]
+    canonical_title = _normalize_wiki_title(payload["parse"].get("title", title))
+    resolved_key = (lang, canonical_title)
+    _HTML_CACHE[resolved_key] = html
+    requested_key = (lang, _normalize_wiki_title(title))
+    if requested_key != resolved_key:
+        _HTML_CACHE[requested_key] = html
+    return html, canonical_title
 
 
-def _is_main_page(title: str) -> bool:
-    normalized = title.strip().lower()
-    if normalized in _MAIN_PAGE_TITLES:
+def _normalize_wiki_title(title: str) -> str:
+    return unicodedata.normalize("NFC", title.strip())
+
+
+def _titles_match(a: str, b: str) -> bool:
+    na = _normalize_wiki_title(a)
+    nb = _normalize_wiki_title(b)
+    if na == nb:
         return True
-    # Match titles that differ only by spaces (e.g. முதற்பக்கம் vs முதற் பக்கம்).
-    collapsed = normalized.replace(" ", "")
-    return collapsed in {t.replace(" ", "") for t in _MAIN_PAGE_TITLES}
+    if na.replace(" ", "") == nb.replace(" ", ""):
+        return True
+    if na.isascii() and nb.isascii() and na.lower() == nb.lower():
+        return True
+    return False
 
 
-def _html_is_main_page_layout(html: str) -> bool:
+def _is_main_page(title: str, wiki_lang: str | None = None) -> bool:
+    if _titles_match(title, "Main Page"):
+        return True
+    for universal in WIKIPEDIA_MAIN_PAGE_TITLES_UNIVERSAL:
+        if _titles_match(title, universal):
+            return True
+
+    if wiki_lang:
+        host = wiki_lang.strip().lower()
+        for candidate in INDIC_WIKIPEDIA_MAIN_PAGE_TITLES.get(host, ()):
+            if _titles_match(title, candidate):
+                return True
+
+    for titles in INDIC_WIKIPEDIA_MAIN_PAGE_TITLES.values():
+        for candidate in titles:
+            if _titles_match(title, candidate):
+                return True
+    return False
+
+
+def _html_is_main_page_layout(
+    html: str,
+    *,
+    wiki_lang: str | None = None,
+    title: str | None = None,
+) -> bool:
     """Detect portal/main-page layout from Wikipedia HTML structure."""
+    if title and wiki_lang and _is_main_page(title, wiki_lang):
+        return True
+
     from bs4 import BeautifulSoup
 
     root = BeautifulSoup(html, "lxml").select_one(".mw-parser-output")
     if root is None:
         return False
-    main_cells = root.select("td.MainPageBG, td#mp-left, td#mp-right")
-    return len(main_cells) >= 2
+    main_cells = root.select("td.MainPageBG, td#mp-left, td#mp-right, table.mainpage")
+    if len(main_cells) >= 2:
+        return True
+    if main_cells:
+        return True
+    # Some wikis (e.g. Urdu) use plain p/li portals without MainPageBG cells.
+    wiki_links = [
+        a
+        for a in root.select('a[href^="/wiki/"]')
+        if a.get("href") and not a["href"].startswith("/wiki/Special:")
+    ]
+    readable_blocks = root.select("p, li")
+    return len(wiki_links) >= 40 and len(readable_blocks) >= 8
 
 
 def _paragraphs_from_html(html: str, *, is_main_page: bool = False) -> list[str]:
@@ -231,7 +473,7 @@ def _paragraphs_from_main_page(root) -> list[str]:
     """
     paragraphs: list[str] = []
 
-    for cell in root.select("td.MainPageBG, td#mp-left, td#mp-right"):
+    for cell in root.select("td.MainPageBG, td#mp-left, td#mp-right, table.mainpage"):
         for element in cell.find_all(["p", "li"], recursive=True):
             text = _clean_element_text(element)
             if text and not _is_boilerplate(text):
@@ -243,6 +485,17 @@ def _paragraphs_from_main_page(root) -> list[str]:
             continue
         text = _clean_element_text(cell)
         if text and len(text.split()) >= 8 and not _is_boilerplate(text):
+            paragraphs.append(text)
+
+    if paragraphs:
+        return _dedupe_paragraphs(paragraphs)
+
+    # Portals without classic MainPageBG layout (e.g. Urdu — content inside tables).
+    for element in root.find_all(["p", "li"], recursive=True):
+        if element.find_parent([".navbox", ".infobox", ".reflist", ".metadata"]):
+            continue
+        text = _clean_element_text(element)
+        if text and not _is_boilerplate(text):
             paragraphs.append(text)
 
     return _dedupe_paragraphs(paragraphs)
@@ -291,9 +544,15 @@ def _dedupe_paragraphs(paragraphs: list[str]) -> list[str]:
     return unique
 
 
-def _extract_article_links(containers, *, wiki_lang: str) -> list[str]:
+def _extract_article_links(
+    containers,
+    *,
+    wiki_lang: str,
+    seen: set[str] | None = None,
+) -> list[str]:
     links: list[str] = []
-    seen: set[str] = set()
+    if seen is None:
+        seen = set()
 
     for container in containers:
         for anchor in container.find_all("a", href=True):

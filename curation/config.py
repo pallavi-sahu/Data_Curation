@@ -57,7 +57,7 @@ LANGUAGE_SCRIPT: dict[str, str] = {
     "kok": "devanagari",
     "mai": "devanagari",
     "ml": "malayalam",
-    "mni": "bengali",
+    "mni": "meetei_mayek",
     "mr": "devanagari",
     "ne": "devanagari",
     "or": "oriya",
@@ -129,3 +129,42 @@ DEFAULT_OUTPUT_FORMAT = "jsonl"
 DEFAULT_OCR_DPI = 200
 # If a PDF yields fewer words-per-page than this, treat it as image-only and OCR.
 MIN_TEXT_LAYER_WORDS_PER_PAGE = 15.0
+
+# Wikipedia recursive crawl defaults.
+DEFAULT_WIKI_CRAWL_DEPTH = 0
+DEFAULT_WIKI_MAX_PAGES = 150
+DEFAULT_WIKI_LINKS_PER_PAGE = 40
+DEFAULT_WIKI_CRAWL_DELAY = 2.5
+# Minimum seconds between Wikipedia API calls (crawl + extract share one cache).
+DEFAULT_WIKI_REQUEST_INTERVAL = 2.5
+
+# Localized Wikipedia main-page titles (from each wiki's siteinfo, plus common variants).
+# Keys are Wikipedia subdomain codes (`gom` for Konkani; pipeline `--target-lang kok`).
+INDIC_WIKIPEDIA_MAIN_PAGE_TITLES: dict[str, tuple[str, ...]] = {
+    "as": ("বেটুপাত",),
+    "bn": ("প্রধান পাতা",),
+    "brx": ("Main Page",),  # incubator only (no brx.wikipedia.org yet)
+    "doi": ("Main Page",),  # incubator only
+    "gu": ("મુખપૃષ્ઠ",),
+    "hi": ("मुखपृष्ठ", "पृष्ठ प्रधान"),
+    "kn": ("ಮುಖ್ಯ ಪುಟ", "ಮುಖ್ಯಪುಟ"),
+    "ks": ("اَہَم صَفہٕ",),
+    "kok": ("मुखेल पान",),
+    "gom": ("मुखेल पान",),  # Konkani Wikipedia host
+    "mai": ("सम्मुख पन्ना", "मुख्य पृष्ठ"),
+    "ml": ("പ്രധാന താൾ", "വിക്കിപീഡിയ"),
+    "mni": ("ꯃꯔꯨꯑꯣꯏꯕ ꯂꯃꯥꯏ", "Main Page"),
+    "mr": ("मुख्य पान", "मुखपृष्ठ"),
+    "ne": ("मुख्य पृष्ठ", "गृहपृष्ठ"),
+    "or": ("ପ୍ରଧାନ ପୃଷ୍ଠା",),
+    "pa": ("ਮੁੱਖ ਸਫ਼ਾ",),
+    "sa": ("मुख्यपृष्ठम्", "मुख्यपृष्ठ"),
+    "sat": ("ᱢᱩᱬᱩᱛ ᱥᱟᱦᱴᱟ",),
+    "sd": ("مُک صفحو",),
+    "ta": ("முதற் பக்கம்", "முதற்பக்கம்"),
+    "te": ("మొదటి పేజీ", "మొదటిపేజీ"),
+    "ur": ("صفحۂ اول", "صفحہ اول"),
+}
+
+# Universal fallbacks (Latin; matched case-insensitively).
+WIKIPEDIA_MAIN_PAGE_TITLES_UNIVERSAL: frozenset[str] = frozenset({"main page"})

@@ -11,6 +11,10 @@ from curation.config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_MIN_WORDS,
     DEFAULT_OUTPUT_FORMAT,
+    DEFAULT_WIKI_CRAWL_DELAY,
+    DEFAULT_WIKI_CRAWL_DEPTH,
+    DEFAULT_WIKI_LINKS_PER_PAGE,
+    DEFAULT_WIKI_MAX_PAGES,
     INDIC_LANGUAGE_CODES,
 )
 from curation.pipeline import run_pipeline
@@ -98,8 +102,49 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         metavar="N",
         help=(
-            "For each Wikipedia URL, also crawl up to N linked /wiki/ articles "
-            "from the page body (default: 0)."
+            "Depth-1 shorthand: follow up to N /wiki/ links per seed page. "
+            "Use 0 with --wiki-crawl-depth 1 to follow ALL links (no cap). "
+            "Ignored if you set --wiki-links-per-page."
+        ),
+    )
+    parser.add_argument(
+        "--wiki-crawl-depth",
+        type=int,
+        default=DEFAULT_WIKI_CRAWL_DEPTH,
+        metavar="N",
+        help=(
+            "Recursively follow /wiki/ links N levels deep from each seed URL "
+            f"(default: {DEFAULT_WIKI_CRAWL_DEPTH}). "
+            "Links are taken from article body text, not site nav headers."
+        ),
+    )
+    parser.add_argument(
+        "--wiki-max-pages",
+        type=int,
+        default=DEFAULT_WIKI_MAX_PAGES,
+        metavar="N",
+        help=(
+            f"Maximum Wikipedia pages to fetch per run (default: {DEFAULT_WIKI_MAX_PAGES}). "
+            "Use 0 for no limit."
+        ),
+    )
+    parser.add_argument(
+        "--wiki-links-per-page",
+        type=int,
+        default=DEFAULT_WIKI_LINKS_PER_PAGE,
+        metavar="N",
+        help=(
+            f"Max /wiki/ links to follow from each page (default: {DEFAULT_WIKI_LINKS_PER_PAGE}). "
+            "Use 0 for no limit (all article links on that page)."
+        ),
+    )
+    parser.add_argument(
+        "--wiki-crawl-delay",
+        type=float,
+        default=DEFAULT_WIKI_CRAWL_DELAY,
+        help=(
+            f"Minimum seconds between Wikipedia API requests (default: {DEFAULT_WIKI_CRAWL_DELAY}). "
+            "Use 2.5–4.0 for large crawls to avoid HTTP 429."
         ),
     )
     parser.add_argument(
@@ -186,6 +231,10 @@ def main(argv: list[str] | None = None) -> int:
         ocr_dpi=args.ocr_dpi,
         ocr_max_pages=args.ocr_max_pages,
         wikipedia_discover_links=args.wiki_discover_links,
+        wikipedia_crawl_depth=args.wiki_crawl_depth,
+        wikipedia_max_pages=args.wiki_max_pages,
+        wikipedia_links_per_page=args.wiki_links_per_page,
+        wikipedia_crawl_delay=args.wiki_crawl_delay,
     )
     return 0
 

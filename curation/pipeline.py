@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-from curation.config import DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_MIN_WORDS
+from curation.config import (
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_MIN_WORDS,
+    DEFAULT_WIKI_CRAWL_DELAY,
+    DEFAULT_WIKI_LINKS_PER_PAGE,
+)
 from curation.extractors.pdf import OcrEngine, extract_text_from_pdf
 from curation.extractors.web import extract_text_from_url
 from curation.extractors.wikipedia import (
-    discover_wikipedia_article_links,
+    clear_wiki_html_cache,
+    configure_wiki_rate_limit,
+    crawl_wikipedia_urls,
     is_wikipedia_url,
+    is_wiki_html_cached,
 )
 from curation.io.writer import OutputFormat, save_records
 from curation.processing.language import LanguageFilter
@@ -86,6 +93,10 @@ def run_pipeline(
     ocr_dpi: int = 200,
     ocr_max_pages: int | None = None,
     wikipedia_discover_links: int = 0,
+    wikipedia_crawl_depth: int = 0,
+    wikipedia_max_pages: int = 150,
+    wikipedia_links_per_page: int = 40,
+    wikipedia_crawl_delay: float = DEFAULT_WIKI_CRAWL_DELAY,
 ) -> int:
     """
     Run the full curation pipeline and write filtered paragraphs to disk.
@@ -113,6 +124,15 @@ def run_pipeline(
 
     all_records: list[dict[str, Any]] = []
 
+    has_wiki = any(is_wikipedia_url(u.strip()) for u in (urls or []) if u.strip())
+    if has_wiki:
+        clear_wiki_html_cache()
+        configure_wiki_rate_limit(min_interval=wikipedia_crawl_delay)
+        logger.info(
+            "Wikipedia rate limit: >=%.1fs between API calls; HTML cached (no double-fetch)",
+            wikipedia_crawl_delay,
+        )
+
     for pdf_path in iter_pdf_paths(pdf_paths or []):
         source = str(pdf_path.resolve())
         logger.info("Extracting PDF: %s", source)
@@ -135,9 +155,12 @@ def run_pipeline(
             continue
         all_records.extend(process_source(source, raw, language_filter))
 
-    expanded_urls = _expand_seed_urls(
+    expanded_urls = _expand_wikipedia_urls(
         urls or [],
         wikipedia_discover_links=wikipedia_discover_links,
+        wikipedia_crawl_depth=wikipedia_crawl_depth,
+        wikipedia_max_pages=wikipedia_max_pages,
+        wikipedia_links_per_page=wikipedia_links_per_page,
         timeout=url_timeout,
     )
 
@@ -145,10 +168,10 @@ def run_pipeline(
         url = url.strip()
         if not url:
             continue
-        # Gentle pacing to reduce Wikipedia API 429 throttling.
-        if index > 0 and is_wikipedia_url(url):
-            time.sleep(0.4)
-        logger.info("Extracting URL: %s", url)
+        if is_wikipedia_url(url) and is_wiki_html_cached(url):
+            logger.info("Extracting URL (cached): %s", url)
+        else:
+            logger.info("Extracting URL: %s", url)
         try:
             raw = extract_text_from_url(url, timeout=url_timeout)
         except Exception:
@@ -172,43 +195,76 @@ def run_pipeline(
     return count
 
 
-def _expand_seed_urls(
+def _expand_wikipedia_urls(
     urls: list[str],
     *,
     wikipedia_discover_links: int,
+    wikipedia_crawl_depth: int,
+    wikipedia_max_pages: int,
+    wikipedia_links_per_page: int,
     timeout: int,
 ) -> list[str]:
-    """Expand seed URLs with discovered Wikipedia article links."""
-    expanded: list[str] = []
-    seen: set[str] = set()
+    """Expand seed URLs with optional recursive Wikipedia crawling."""
+    wiki_seeds = [u.strip() for u in urls if u.strip() and is_wikipedia_url(u)]
+    non_wiki = [u.strip() for u in urls if u.strip() and not is_wikipedia_url(u)]
 
-    for raw in urls:
-        url = raw.strip()
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        expanded.append(url)
+    depth, links_per_page = _resolve_wiki_crawl_settings(
+        wikipedia_crawl_depth,
+        wikipedia_discover_links,
+        wikipedia_links_per_page,
+    )
 
-        if wikipedia_discover_links <= 0 or not is_wikipedia_url(url):
-            continue
-
-        try:
-            discovered = discover_wikipedia_article_links(
-                url,
-                timeout=timeout,
-                max_links=wikipedia_discover_links,
+    if depth > 0 and wiki_seeds:
+        if wikipedia_max_pages <= 0:
+            max_pages = 0
+            logger.info("Wikipedia crawl: no page limit (until links are exhausted)")
+        else:
+            max_pages = max(wikipedia_max_pages, len(wiki_seeds))
+        if links_per_page == 0:
+            logger.info(
+                "Following all /wiki/ links found on each page (no per-page limit)"
             )
-        except Exception:
-            logger.exception("Failed discovering Wikipedia links from %s", url)
-            continue
+        crawled = crawl_wikipedia_urls(
+            wiki_seeds,
+            crawl_depth=depth,
+            max_pages=max_pages,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "Wikipedia crawl depth=%s: %s seed(s) -> %s page(s) to extract",
+            depth,
+            len(wiki_seeds),
+            len(crawled),
+        )
+        return non_wiki + crawled
 
-        new_links = 0
-        for link in discovered:
-            if link in seen:
-                continue
-            seen.add(link)
-            expanded.append(link)
-            new_links += 1
-        logger.info("Discovered %s linked Wikipedia articles from %s", new_links, url)
+    return non_wiki + wiki_seeds
 
-    return expanded
+
+def _resolve_wiki_crawl_settings(
+    crawl_depth: int,
+    discover_links: int,
+    links_per_page: int,
+) -> tuple[int, int]:
+    """
+  Resolve crawl depth and per-page link cap.
+
+  ``links_per_page == 0`` means no limit (follow every /wiki/ link on the page).
+  ``--wiki-discover-links N`` (N > 0) enables depth 1 unless ``--wiki-crawl-depth``
+  is already set higher.
+  """
+    depth = crawl_depth
+    if depth <= 0 and discover_links != 0:
+        depth = 1
+
+    # Explicit --wiki-links-per-page always wins (including 0 = unlimited).
+    if links_per_page != DEFAULT_WIKI_LINKS_PER_PAGE:
+        return depth, links_per_page
+
+    if discover_links > 0:
+        return depth, discover_links
+    if discover_links == 0 and depth > 0:
+        return depth, 0
+
+    return depth, DEFAULT_WIKI_LINKS_PER_PAGE

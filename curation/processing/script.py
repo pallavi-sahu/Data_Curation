@@ -14,6 +14,7 @@ SCRIPT_RANGES: dict[str, list[tuple[int, int]]] = {
     "kannada": [(0x0C80, 0x0CFF)],
     "malayalam": [(0x0D00, 0x0D7F)],
     "ol_chiki": [(0x1C50, 0x1C7F)],
+    "meetei_mayek": [(0xABC0, 0xABFF), (0xAA00, 0xAA5F)],
     "arabic": [(0x0600, 0x06FF), (0x0750, 0x077F)],
 }
 
