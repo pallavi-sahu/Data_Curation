@@ -1,40 +1,48 @@
-"""Extract text from PDFs: text layer first, OCR when the layer is missing."""
+"""Extract text from PDF textbooks via the embedded text layer (no images)."""
 
 from __future__ import annotations
 
 import logging
-import shutil
+import re
 from pathlib import Path
-from typing import Literal
 
 import fitz  # PyMuPDF
 
-from curation.config import DEFAULT_OCR_DPI, MIN_TEXT_LAYER_WORDS_PER_PAGE
+from curation.config import LANGUAGE_SCRIPT, MIN_TEXT_LAYER_WORDS_PER_PAGE
+from curation.extractors.pdf_ocr import OcrEngine, extract_pdf_ocr
+from curation.processing.script import script_character_ratio
+
+__all__ = ["OcrEngine", "extract_text_from_pdf"]
 
 logger = logging.getLogger(__name__)
 
-OcrEngine = Literal["tesseract", "easyocr", "auto"]
+# Block type 0 = text, 1 = image in PyMuPDF dict/blocks output.
+_TEXT_BLOCK = 0
+
+# Lines that are only page numbers or figure labels.
+_PAGE_NOISE_RE = re.compile(
+    r"^\s*(?:page\s+)?\d{1,4}\s*(?:of\s+\d{1,4})?\s*$",
+    re.IGNORECASE,
+)
 
 
 def extract_text_from_pdf(
     pdf_path: str | Path,
     *,
     force_ocr: bool = False,
-    auto_ocr: bool = True,
+    auto_ocr: bool = False,
     ocr_lang: str | None = None,
-    ocr_dpi: int = DEFAULT_OCR_DPI,
+    ocr_dpi: int = 200,
     ocr_engine: OcrEngine = "auto",
     target_language: str | None = None,
     ocr_max_pages: int | None = None,
 ) -> str:
     """
-    Extract text from a PDF.
+    Extract readable text from a PDF using its **text layer** only.
 
-    1. Read the embedded text layer (fast; no OCR on figures).
-    2. If the layer is effectively empty (common for CorelDRAW / scanned exports),
-       run OCR automatically unless ``auto_ocr=False``.
-
-    OCR engines (in ``auto`` mode): Tesseract if installed, else EasyOCR.
+    - Walks PyMuPDF text blocks in reading order; **image blocks are skipped**.
+    - Does not render page bitmaps unless OCR is explicitly requested.
+    - Use ``--pdf-ocr`` or ``--auto-ocr`` for scanned / image-only PDFs.
     """
     path = Path(pdf_path)
     if not path.is_file():
@@ -42,174 +50,141 @@ def extract_text_from_pdf(
 
     doc = fitz.open(path)
     try:
-        text_layer = _extract_text_layer(doc)
+        page_limit = ocr_max_pages or doc.page_count
+        text_layer = _extract_text_layer(doc, max_pages=page_limit)
         word_count = len(text_layer.split())
-        pages = max(doc.page_count, 1)
-        words_per_page = word_count / pages
+        pages_used = min(doc.page_count, page_limit)
+        words_per_page = word_count / max(pages_used, 1)
+
+        if target_language and text_layer.strip():
+            _warn_if_unusable_text_layer(path, text_layer, target_language)
 
         needs_ocr = force_ocr or (
             auto_ocr and words_per_page < MIN_TEXT_LAYER_WORDS_PER_PAGE
         )
 
-        if not needs_ocr:
-            if word_count:
-                logger.info(
-                    "PDF text layer: %s words across %s pages (%.1f words/page)",
-                    word_count,
-                    doc.page_count,
-                    words_per_page,
-                )
-            return text_layer
+        if needs_ocr:
+            lang = _resolve_ocr_lang(ocr_lang, target_language, ocr_engine)
+            logger.warning(
+                "PDF '%s': using OCR (%s words, %.1f words/page). "
+                "For textbooks with a text layer, omit --pdf-ocr and --auto-ocr.",
+                path.name,
+                word_count,
+                words_per_page,
+            )
+            return extract_pdf_ocr(
+                doc,
+                ocr_lang=lang,
+                ocr_dpi=ocr_dpi,
+                ocr_engine=ocr_engine,
+                target_language=target_language,
+                max_pages=page_limit,
+            )
 
-        lang = ocr_lang
-        if not lang and target_language:
-            from curation.config import OCR_EASYOCR_LANG, OCR_TESSERACT_LANG
-
-            if ocr_engine in ("tesseract", "auto") and shutil.which("tesseract"):
-                lang = OCR_TESSERACT_LANG.get(target_language, "hin+eng")
-            else:
-                lang = "+".join(OCR_EASYOCR_LANG.get(target_language, ["hi", "en"]))
-
-        logger.warning(
-            "PDF '%s' has almost no text layer (%s words, %.1f words/page). "
-            "Running OCR — typical for CorelDRAW / vector-only exports.",
-            path.name,
-            word_count,
-            words_per_page,
-        )
-        return _extract_ocr(
-            doc,
-            ocr_lang=lang or "hin+eng",
-            ocr_dpi=ocr_dpi,
-            ocr_engine=ocr_engine,
-            target_language=target_language,
-            ocr_max_pages=ocr_max_pages,
-        )
+        if word_count:
+            logger.info(
+                "PDF text layer: %s words across %s page(s) (%.1f words/page, images skipped)",
+                word_count,
+                pages_used,
+                words_per_page,
+            )
+        else:
+            logger.warning(
+                "PDF '%s': no text extracted from the text layer. "
+                "The file may be scanned, use custom fonts without Unicode mapping, "
+                "or be image-only. Try --auto-ocr or --pdf-ocr if appropriate.",
+                path.name,
+            )
+        return text_layer
     finally:
         doc.close()
 
 
-def _extract_text_layer(doc: fitz.Document) -> str:
-    pages: list[str] = []
-    for page in doc:
-        text = page.get_text("text") or ""
-        if text.strip():
-            pages.append(text)
-    return "\n\n".join(pages)
+def _extract_text_layer(doc: fitz.Document, *, max_pages: int) -> str:
+    """Collect text blocks per page; ignore image blocks and empty noise lines."""
+    page_texts: list[str] = []
+    for page_index, page in enumerate(doc):
+        if page_index >= max_pages:
+            break
+        page_text = _extract_page_text(page)
+        if page_text.strip():
+            page_texts.append(page_text)
+    return "\n\n".join(page_texts)
 
 
-def _extract_ocr(
-    doc: fitz.Document,
-    *,
-    ocr_lang: str,
-    ocr_dpi: int,
+def _extract_page_text(page: fitz.Page) -> str:
+    """
+    Extract text blocks in reading order (``sort=True``).
+
+    Uses the structured dict representation so image blocks (type 1) are never
+    included. Spans within a line are joined; lines within a block are kept;
+    blocks are separated by blank lines.
+    """
+    page_dict = page.get_text("dict", sort=True)
+    block_chunks: list[str] = []
+
+    for block in page_dict.get("blocks", []):
+        if block.get("type") != _TEXT_BLOCK:
+            continue
+
+        line_texts: list[str] = []
+        for line in block.get("lines", []):
+            span_parts: list[str] = []
+            for span in line.get("spans", []):
+                piece = span.get("text", "")
+                if piece:
+                    span_parts.append(piece)
+            if not span_parts:
+                continue
+            line_text = _normalize_line("".join(span_parts))
+            if line_text and not _PAGE_NOISE_RE.match(line_text):
+                line_texts.append(line_text)
+
+        if line_texts:
+            block_chunks.append("\n".join(line_texts))
+
+    return "\n\n".join(block_chunks)
+
+
+def _normalize_line(text: str) -> str:
+    """Collapse internal whitespace; strip control characters."""
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _warn_if_unusable_text_layer(
+    path: Path, text: str, target_language: str
+) -> None:
+    """Warn when the text layer looks like legacy/custom font garbage."""
+    script = LANGUAGE_SCRIPT.get(target_language)
+    if not script:
+        return
+    ratio = script_character_ratio(text, script)
+    if ratio >= 0.15:
+        return
+    logger.warning(
+        "PDF '%s' text layer has very little %s script (%.1f%% of letters). "
+        "Common with custom/legacy PDF fonts (e.g. Priyaanka). "
+        "Output may be empty after language filtering, or you may need OCR/font tools.",
+        path.name,
+        script,
+        ratio * 100,
+    )
+
+
+def _resolve_ocr_lang(
+    ocr_lang: str | None,
+    target_language: str | None,
     ocr_engine: OcrEngine,
-    target_language: str | None,
-    ocr_max_pages: int | None,
 ) -> str:
-    engine = _resolve_ocr_engine(ocr_engine)
-    page_limit = ocr_max_pages or doc.page_count
-    if engine == "tesseract":
-        return _ocr_tesseract(doc, ocr_lang, ocr_dpi, page_limit=page_limit)
-    return _ocr_easyocr(doc, ocr_lang, target_language, page_limit=page_limit)
+    if ocr_lang:
+        return ocr_lang
+    if not target_language:
+        return "hin+eng"
+    import shutil
 
+    from curation.config import OCR_EASYOCR_LANG, OCR_TESSERACT_LANG
 
-def _resolve_ocr_engine(ocr_engine: OcrEngine) -> Literal["tesseract", "easyocr"]:
-    if ocr_engine == "tesseract":
-        if not shutil.which("tesseract"):
-            raise RuntimeError(
-                "Tesseract is not installed. Run: "
-                "sudo apt install tesseract-ocr tesseract-ocr-hin"
-            )
-        return "tesseract"
-    if ocr_engine == "easyocr":
-        return "easyocr"
-    # auto
-    if shutil.which("tesseract"):
-        return "tesseract"
-    logger.info("Tesseract not found; falling back to EasyOCR (pip-only, slower first run)")
-    return "easyocr"
-
-
-def _ocr_tesseract(
-    doc: fitz.Document, ocr_lang: str, ocr_dpi: int, *, page_limit: int
-) -> str:
-    try:
-        import pytesseract
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError(
-            "Install OCR dependencies: pip install pytesseract Pillow"
-        ) from exc
-
-    if not shutil.which("tesseract"):
-        raise RuntimeError(
-            "Tesseract binary not found. Install e.g.: "
-            "sudo apt install tesseract-ocr tesseract-ocr-hin"
-        )
-
-    matrix = fitz.Matrix(ocr_dpi / 72, ocr_dpi / 72)
-    pages: list[str] = []
-    total = min(doc.page_count, page_limit)
-
-    for index, page in enumerate(doc, start=1):
-        if index > page_limit:
-            break
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        text = pytesseract.image_to_string(image, lang=ocr_lang)
-        if text.strip():
-            pages.append(text)
-        if index % 10 == 0 or index == total:
-            logger.info("OCR (tesseract): %s/%s pages", index, total)
-
-    return "\n\n".join(pages)
-
-
-def _ocr_easyocr(
-    doc: fitz.Document,
-    ocr_lang: str,
-    target_language: str | None,
-    *,
-    page_limit: int,
-) -> str:
-    try:
-        import easyocr
-        import numpy as np
-    except ImportError as exc:
-        raise RuntimeError(
-            "EasyOCR not installed. Run: pip install easyocr"
-        ) from exc
-
-    from curation.config import OCR_EASYOCR_LANG
-
-    if "+" in ocr_lang or "," in ocr_lang:
-        langs = [part.strip() for part in ocr_lang.replace(",", "+").split("+") if part.strip()]
-    elif target_language and target_language in OCR_EASYOCR_LANG:
-        langs = OCR_EASYOCR_LANG[target_language]
-    else:
-        langs = ["hi", "en"]
-
-    reader = easyocr.Reader(langs, gpu=False, verbose=False)
-    matrix = fitz.Matrix(2.0, 2.0)
-    pages: list[str] = []
-    total = min(doc.page_count, page_limit)
-
-    for index, page in enumerate(doc, start=1):
-        if index > page_limit:
-            break
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-        channels = pix.n
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, channels
-        )
-        if channels == 4:
-            img = img[:, :, :3]
-        lines = reader.readtext(img, detail=0, paragraph=True)
-        text = "\n".join(lines)
-        if text.strip():
-            pages.append(text)
-        if index % 10 == 0 or index == total:
-            logger.info("OCR (easyocr): %s/%s pages", index, total)
-
-    return "\n\n".join(pages)
+    if ocr_engine in ("tesseract", "auto") and shutil.which("tesseract"):
+        return OCR_TESSERACT_LANG.get(target_language, "hin+eng")
+    return "+".join(OCR_EASYOCR_LANG.get(target_language, ["hi", "en"]))

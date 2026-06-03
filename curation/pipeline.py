@@ -11,6 +11,7 @@ from curation.config import (
     DEFAULT_MIN_WORDS,
     DEFAULT_WIKI_CRAWL_DELAY,
     DEFAULT_WIKI_LINKS_PER_PAGE,
+    LANGUAGE_SCRIPT,
 )
 from curation.extractors.pdf import OcrEngine, extract_text_from_pdf
 from curation.extractors.html import extract_text_from_html_file
@@ -65,6 +66,51 @@ def process_source(
     return records
 
 
+def _warn_pdf_language_mismatch(
+    source: str, raw_text: str, target_language: str
+) -> None:
+    """Hint when PDF text was extracted but nothing passed the language filter."""
+    from curation.processing.script import script_character_ratio
+
+    target_script = LANGUAGE_SCRIPT.get(target_language, "")
+    if not target_script:
+        return
+
+    target_ratio = script_character_ratio(raw_text, target_script)
+    if target_ratio >= 0.15:
+        return
+
+    best_lang = ""
+    best_ratio = 0.0
+    for code, script in LANGUAGE_SCRIPT.items():
+        ratio = script_character_ratio(raw_text, script)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_lang = code
+
+    if best_ratio >= 0.5 and best_lang and best_lang != target_language:
+        logger.warning(
+            "No fragments kept from %s: --target-lang %s sees %.0f%% %s script "
+            "in the extract, but ~%.0f%% looks like %s. Re-run with --target-lang %s.",
+            source,
+            target_language,
+            target_ratio * 100,
+            target_script,
+            best_ratio * 100,
+            best_lang,
+            best_lang,
+        )
+        return
+
+    logger.warning(
+        "No fragments kept from %s: only %.0f%% %s script in the text layer "
+        "(check --target-lang or legacy PDF fonts).",
+        source,
+        target_ratio * 100,
+        target_script,
+    )
+
+
 def iter_pdf_paths(pdf_inputs: list[str]) -> Iterator[Path]:
     """Expand file paths and directories into PDF files."""
     for item in pdf_inputs:
@@ -103,7 +149,7 @@ def run_pipeline(
     model_path: Path | None = None,
     url_timeout: int = 30,
     force_ocr: bool = False,
-    auto_ocr: bool = True,
+    auto_ocr: bool = False,
     ocr_lang: str | None = None,
     ocr_engine: OcrEngine = "auto",
     ocr_dpi: int = 200,
@@ -184,7 +230,10 @@ def run_pipeline(
         if not raw.strip():
             logger.warning("No text extracted from PDF: %s", source)
             continue
+        before = len(all_records)
         all_records.extend(process_source(source, raw, language_filter))
+        if len(all_records) == before:
+            _warn_pdf_language_mismatch(source, raw, target_language)
 
     for html_path in iter_html_paths(html_paths or []):
         source = str(html_path.resolve())
@@ -228,6 +277,13 @@ def run_pipeline(
     scraped = len(all_records)
     output_records = pack_records(all_records, min_words=min_words)
     count = save_records(output_records, output_path, output_format=output_format)
+    if scraped > 0 and count == 0 and min_words > 0:
+        logger.warning(
+            "No output rows written: no single source reached min_words=%s "
+            "(text from different pages is never merged). For short news "
+            "articles, try a lower --min-words (e.g. 150–300).",
+            min_words,
+        )
     logger.info(
         "Kept %s language-matching fragments, wrote %s output rows (min_words=%s) to %s",
         scraped,

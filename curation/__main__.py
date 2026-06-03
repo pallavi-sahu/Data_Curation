@@ -163,12 +163,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pdf-ocr",
         action="store_true",
-        help="Force OCR on PDFs (for CorelDRAW / image-only exports)",
+        help="Force OCR on PDFs (scanned/image-only; renders pages, slow)",
+    )
+    parser.add_argument(
+        "--auto-ocr",
+        action="store_true",
+        help="OCR only when the PDF text layer is nearly empty (<15 words/page)",
     )
     parser.add_argument(
         "--no-auto-ocr",
         action="store_true",
-        help="Disable automatic OCR when the PDF text layer is empty",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--ocr-lang",
@@ -193,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="Process only the first N PDF pages (useful for testing OCR)",
+        help="Process only the first N PDF pages (text layer or OCR)",
     )
     parser.add_argument(
         "-v",
@@ -250,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         model_path=args.model_path,
         url_timeout=args.url_timeout,
         force_ocr=args.pdf_ocr,
-        auto_ocr=not args.no_auto_ocr,
+        auto_ocr=args.auto_ocr and not args.no_auto_ocr,
         ocr_lang=args.ocr_lang,
         ocr_engine=args.ocr_engine,
         ocr_dpi=args.ocr_dpi,

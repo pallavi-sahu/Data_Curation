@@ -179,18 +179,31 @@ The same flags apply to **Wikipedia** (`/wiki/` links) and **other sites** (same
 | `te` | మొదటి పేజీ | te.wikipedia.org |
 | `ur` | صفحۂ اول | ur.wikipedia.org |
 
-### PDF extraction and OCR
+### PDF extraction (textbooks — text layer, no images)
+
+By default PDFs use **PyMuPDF** on the embedded **text layer** only: text blocks are read in order, **image blocks are skipped**, and pages are not rendered. This is the right mode for Unicode textbooks.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--pdf-ocr` | off | Force OCR on all PDF pages. |
-| `--no-auto-ocr` | off | Disable auto-OCR when the PDF has almost no text layer. |
-| `--ocr-engine` | `auto` | `tesseract`, `easyocr`, or `auto` (Tesseract if installed, else EasyOCR). |
-| `--ocr-lang` | inferred | Tesseract language packs, e.g. `hin+eng`, `kan+eng`, `tam+eng`. |
-| `--ocr-dpi` | `200` | Render resolution for Tesseract. |
-| `--ocr-max-pages` | all | Only OCR/extract the first N pages (testing). |
+| `--pdf PATH` | — | PDF file or directory (repeatable). |
+| `--ocr-max-pages` | all | Only read the first N pages (testing). |
+| `--pdf-ocr` | off | Force OCR (renders every page as an image; slow). |
+| `--auto-ocr` | off | OCR only if the text layer is nearly empty (&lt;15 words/page). |
+| `--ocr-engine` | `auto` | `tesseract`, `easyocr`, or `auto` (only with OCR flags). |
+| `--ocr-lang` | inferred | Tesseract packs, e.g. `tel+eng`, `kan+eng`. |
+| `--ocr-dpi` | `200` | Render DPI when using OCR. |
 
-PDFs with a normal text layer use **PyMuPDF** (no OCR). Image-only PDFs trigger OCR automatically unless `--no-auto-ocr`.
+**Example — Kannada textbook (text layer only):**
+
+```bash
+python -m curation \
+  --pdf ./textbooks/kannada_social.pdf \
+  --target-lang kn \
+  --min-words 500 \
+  --output curated_kn_textbook.jsonl
+```
+
+If you see a warning about **low script ratio**, the PDF may use legacy/custom fonts (not real Unicode in the text layer). Fix the source PDF or use `--pdf-ocr` as a last resort.
 
 ### Debugging
 
@@ -341,6 +354,8 @@ python -m curation \
 
 Use `--wiki-max-pages` to cap total pages (default `150`). `0` = no limit.
 
+**Short news articles:** A typical story is 200–400 words, so `--min-words 500` often yields **0 rows** (nothing is merged across URLs, and sub-500 tails are dropped). Use e.g. `--min-words 200` for Bodo/Indic news sites.
+
 ### Project Madurai HTML (local file or URL)
 
 ```bash
@@ -407,7 +422,8 @@ data_curation/
 │   ├── pipeline.py          # Orchestration
 │   ├── config.py            # Language codes and defaults
 │   ├── extractors/
-│   │   ├── pdf.py           # PDF text layer + OCR
+│   │   ├── pdf.py           # PDF text layer (blocks; images skipped)
+│   │   ├── pdf_ocr.py       # Optional OCR path
 │   │   ├── html.py          # Local HTML + .html URLs (Trafilatura)
 │   │   ├── web.py           # URLs (routes Wikipedia / HTML)
 │   │   ├── crawl.py         # Same-site link crawl (non-Wikipedia)
@@ -429,7 +445,7 @@ data_curation/
 |---------|-------------|
 | Very few JSONL rows from a **main page** | Use `--wiki-crawl-depth 1` (or `2`) and raise `--wiki-max-pages`. Or use a full **article** URL. |
 | `HTTP Error 429` from Wikipedia | Use `--wiki-crawl-delay 3` (or `4`), avoid `--wiki-max-pages 0` with depth 2 until a smaller test succeeds. HTML is cached so each page is only fetched once. Wait 10–30 min and retry if blocked. |
-| PDF returns 0 paragraphs | PDF may be image-only; use `--pdf-ocr` or install Tesseract. |
+| PDF returns 0 paragraphs | Text layer empty or legacy fonts (Priyaanka etc.); check with `-v`. Try a proper Unicode PDF, or `--pdf-ocr` for scans. |
 | `brx` / low-resource language drops text | Lower `--confidence` (e.g. `0.70`); Bodo uses script detection, not fastText `brx`. |
 | NumPy / fastText error | Ensure `numpy<2.0` (`pip install 'numpy<2.0'`). |
 | Mixed English in Tamil rows | Script filter should drop most; try `--confidence 0.90` or use article URLs, not language-footer portal pages. |
