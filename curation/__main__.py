@@ -24,7 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
     supported = ", ".join(sorted(INDIC_LANGUAGE_CODES))
     parser = argparse.ArgumentParser(
         description=(
-            "Curate text from PDFs and URLs: extract, segment, "
+            "Curate text from PDFs, HTML files, and URLs: extract, segment, "
             "filter by Indic language, and export to JSONL/CSV."
         ),
     )
@@ -36,11 +36,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="PDF file or directory (repeatable)",
     )
     parser.add_argument(
+        "--html",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="HTML file or directory (repeatable: --html a.html --html dir/)",
+    )
+    parser.add_argument(
         "--url",
         action="append",
         default=[],
         metavar="URL",
         help="Web URL to extract (repeatable; Wikipedia supported)",
+    )
+    parser.add_argument(
+        "--htmls-file",
+        metavar="FILE",
+        help="Text file with one local HTML path per line",
     )
     parser.add_argument(
         "--urls-file",
@@ -70,9 +82,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MIN_WORDS,
         help=(
-            f"Target minimum words per JSONL/CSV row by merging adjacent "
-            f"fragments (default: {DEFAULT_MIN_WORDS}). Does not drop "
-            f"shorter scraped text."
+            f"Minimum words per JSONL/CSV row; merge fragments from the same "
+            f"source only (default: {DEFAULT_MIN_WORDS}). Text under the limit "
+            f"left at the end of a page is not written."
         ),
     )
     parser.add_argument(
@@ -113,9 +125,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WIKI_CRAWL_DEPTH,
         metavar="N",
         help=(
-            "Recursively follow /wiki/ links N levels deep from each seed URL "
+            "Recursively follow links N levels deep from each seed URL "
             f"(default: {DEFAULT_WIKI_CRAWL_DEPTH}). "
-            "Links are taken from article body text, not site nav headers."
+            "Wikipedia: /wiki/ article links. Other sites: same-host links from "
+            "article/main content (nav/footer stripped)."
         ),
     )
     parser.add_argument(
@@ -124,7 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WIKI_MAX_PAGES,
         metavar="N",
         help=(
-            f"Maximum Wikipedia pages to fetch per run (default: {DEFAULT_WIKI_MAX_PAGES}). "
+            f"Maximum pages to fetch per crawl (default: {DEFAULT_WIKI_MAX_PAGES}). "
             "Use 0 for no limit."
         ),
     )
@@ -143,7 +156,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_WIKI_CRAWL_DELAY,
         help=(
-            f"Minimum seconds between Wikipedia API requests (default: {DEFAULT_WIKI_CRAWL_DELAY}). "
+            f"Minimum seconds between crawl HTTP/API requests (default: {DEFAULT_WIKI_CRAWL_DELAY}). "
             "Use 2.5–4.0 for large crawls to avoid HTTP 429."
         ),
     )
@@ -211,11 +224,23 @@ def main(argv: list[str] | None = None) -> int:
             if line.strip() and not line.strip().startswith("#")
         )
 
-    if not args.pdf and not urls:
-        parser.error("Provide at least one --pdf or --url (or --urls-file)")
+    html_paths = list(args.html)
+    if args.htmls_file:
+        htmls_path = Path(args.htmls_file)
+        if not htmls_path.is_file():
+            parser.error(f"HTML paths file not found: {htmls_path}")
+        html_paths.extend(
+            line.strip()
+            for line in htmls_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        )
+
+    if not args.pdf and not urls and not html_paths:
+        parser.error("Provide at least one --pdf, --html, or --url (or --urls-file)")
 
     run_pipeline(
         pdf_paths=args.pdf,
+        html_paths=html_paths,
         urls=urls,
         target_language=args.target_lang,
         output_path=args.output,

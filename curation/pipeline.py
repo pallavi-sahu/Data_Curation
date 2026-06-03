@@ -13,7 +13,9 @@ from curation.config import (
     DEFAULT_WIKI_LINKS_PER_PAGE,
 )
 from curation.extractors.pdf import OcrEngine, extract_text_from_pdf
+from curation.extractors.html import extract_text_from_html_file
 from curation.extractors.web import extract_text_from_url
+from curation.extractors.crawl import configure_web_crawl_rate_limit, crawl_web_urls
 from curation.extractors.wikipedia import (
     clear_wiki_html_cache,
     configure_wiki_rate_limit,
@@ -75,9 +77,23 @@ def iter_pdf_paths(pdf_inputs: list[str]) -> Iterator[Path]:
             logger.warning("Skipping non-PDF path: %s", path)
 
 
+def iter_html_paths(html_inputs: list[str]) -> Iterator[Path]:
+    """Expand file paths and directories into HTML files."""
+    for item in html_inputs:
+        path = Path(item)
+        if path.is_dir():
+            for pattern in ("*.html", "*.htm", "*.xhtml"):
+                yield from sorted(path.rglob(pattern))
+        elif path.suffix.lower() in {".html", ".htm", ".xhtml"} and path.is_file():
+            yield path
+        else:
+            logger.warning("Skipping non-HTML path: %s", path)
+
+
 def run_pipeline(
     *,
     pdf_paths: list[str] | None = None,
+    html_paths: list[str] | None = None,
     urls: list[str] | None = None,
     target_language: str,
     output_path: str,
@@ -102,7 +118,8 @@ def run_pipeline(
     Run the full curation pipeline and write filtered paragraphs to disk.
 
     Scraping keeps all language-matching text (any length). ``min_words`` controls
-    how fragments are merged into each JSONL/CSV output row.
+    how fragments from each source are merged into JSONL/CSV rows (never across
+    different URLs/files). Rows under ``min_words`` at the end of a source are omitted.
 
     Returns the total number of rows written.
     """
@@ -125,6 +142,12 @@ def run_pipeline(
     all_records: list[dict[str, Any]] = []
 
     has_wiki = any(is_wikipedia_url(u.strip()) for u in (urls or []) if u.strip())
+    has_urls = any(u.strip() for u in (urls or []))
+    depth, links_per_page = _resolve_wiki_crawl_settings(
+        wikipedia_crawl_depth,
+        wikipedia_discover_links,
+        wikipedia_links_per_page,
+    )
     if has_wiki:
         clear_wiki_html_cache()
         configure_wiki_rate_limit(min_interval=wikipedia_crawl_delay)
@@ -132,6 +155,14 @@ def run_pipeline(
             "Wikipedia rate limit: >=%.1fs between API calls; HTML cached (no double-fetch)",
             wikipedia_crawl_delay,
         )
+    if has_urls and depth > 0 and not has_wiki:
+        configure_web_crawl_rate_limit(min_interval=wikipedia_crawl_delay)
+        logger.info(
+            "Web crawl rate limit: >=%.1fs between HTTP requests",
+            wikipedia_crawl_delay,
+        )
+    elif has_urls and depth > 0 and has_wiki:
+        configure_web_crawl_rate_limit(min_interval=wikipedia_crawl_delay)
 
     for pdf_path in iter_pdf_paths(pdf_paths or []):
         source = str(pdf_path.resolve())
@@ -155,12 +186,24 @@ def run_pipeline(
             continue
         all_records.extend(process_source(source, raw, language_filter))
 
-    expanded_urls = _expand_wikipedia_urls(
+    for html_path in iter_html_paths(html_paths or []):
+        source = str(html_path.resolve())
+        logger.info("Extracting HTML: %s", source)
+        try:
+            raw = extract_text_from_html_file(html_path)
+        except Exception:
+            logger.exception("Failed to extract HTML: %s", source)
+            continue
+        if not raw.strip():
+            logger.warning("No text extracted from HTML: %s", source)
+            continue
+        all_records.extend(process_source(source, raw, language_filter))
+
+    expanded_urls = _expand_urls(
         urls or [],
-        wikipedia_discover_links=wikipedia_discover_links,
-        wikipedia_crawl_depth=wikipedia_crawl_depth,
-        wikipedia_max_pages=wikipedia_max_pages,
-        wikipedia_links_per_page=wikipedia_links_per_page,
+        crawl_depth=depth,
+        links_per_page=links_per_page,
+        max_pages=wikipedia_max_pages,
         timeout=url_timeout,
     )
 
@@ -195,51 +238,89 @@ def run_pipeline(
     return count
 
 
-def _expand_wikipedia_urls(
+def _expand_urls(
     urls: list[str],
     *,
-    wikipedia_discover_links: int,
-    wikipedia_crawl_depth: int,
-    wikipedia_max_pages: int,
-    wikipedia_links_per_page: int,
+    crawl_depth: int,
+    max_pages: int,
+    links_per_page: int,
     timeout: int,
 ) -> list[str]:
-    """Expand seed URLs with optional recursive Wikipedia crawling."""
+    """Expand seed URLs with optional recursive crawling (Wikipedia and other sites)."""
     wiki_seeds = [u.strip() for u in urls if u.strip() and is_wikipedia_url(u)]
-    non_wiki = [u.strip() for u in urls if u.strip() and not is_wikipedia_url(u)]
+    web_seeds = [u.strip() for u in urls if u.strip() and not is_wikipedia_url(u)]
 
-    depth, links_per_page = _resolve_wiki_crawl_settings(
-        wikipedia_crawl_depth,
-        wikipedia_discover_links,
-        wikipedia_links_per_page,
-    )
+    if crawl_depth <= 0:
+        return web_seeds + wiki_seeds
 
-    if depth > 0 and wiki_seeds:
-        if wikipedia_max_pages <= 0:
-            max_pages = 0
-            logger.info("Wikipedia crawl: no page limit (until links are exhausted)")
-        else:
-            max_pages = max(wikipedia_max_pages, len(wiki_seeds))
-        if links_per_page == 0:
-            logger.info(
-                "Following all /wiki/ links found on each page (no per-page limit)"
-            )
-        crawled = crawl_wikipedia_urls(
+    if max_pages <= 0:
+        page_limit = 0
+        logger.info("URL crawl: no page limit (until links are exhausted)")
+    else:
+        page_limit = max(max_pages, len(wiki_seeds) + len(web_seeds))
+
+    if links_per_page == 0:
+        logger.info("Following all article links on each page (no per-page limit)")
+
+    expanded: list[str] = []
+
+    if web_seeds:
+        crawled_web = crawl_web_urls(
+            web_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "Web crawl depth=%s: %s seed(s) -> %s page(s) to extract",
+            crawl_depth,
+            len(web_seeds),
+            len(crawled_web),
+        )
+        expanded.extend(crawled_web)
+
+    if wiki_seeds:
+        crawled_wiki = crawl_wikipedia_urls(
             wiki_seeds,
-            crawl_depth=depth,
-            max_pages=max_pages,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
             links_per_page=links_per_page,
             timeout=timeout,
         )
         logger.info(
             "Wikipedia crawl depth=%s: %s seed(s) -> %s page(s) to extract",
-            depth,
+            crawl_depth,
             len(wiki_seeds),
-            len(crawled),
+            len(crawled_wiki),
         )
-        return non_wiki + crawled
+        expanded.extend(crawled_wiki)
 
-    return non_wiki + wiki_seeds
+    if not expanded:
+        return web_seeds + wiki_seeds
+
+    return _dedupe_url_list(expanded)
+
+
+def _dedupe_url_list(urls: list[str]) -> list[str]:
+    import urllib.parse
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        parsed = urllib.parse.urlparse(url)
+        netloc = parsed.netloc.lower().removeprefix("www.")
+        path = parsed.path or "/"
+        if path != "/":
+            path = path.rstrip("/")
+        key = urllib.parse.urlunparse(
+            (parsed.scheme.lower(), netloc, path, "", parsed.query, "")
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(url)
+    return ordered
 
 
 def _resolve_wiki_crawl_settings(

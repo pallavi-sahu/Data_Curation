@@ -4,7 +4,7 @@ Extract and curate text from **PDF files** and **web URLs** (including Wikipedia
 
 1. Extracts main body text (not image OCR on web; PDFs use text layer or optional OCR).
 2. Splits text into paragraphs and keeps fragments that match your target language.
-3. Merges fragments into JSONL/CSV rows where every `paragraph` has **at least** `--min-words` words.
+3. Merges fragments into JSONL/CSV rows (per page/URL): each row has **at least** `--min-words` words from a **single** source; leftover text under that limit on one page is **not** written.
 
 ---
 
@@ -61,7 +61,7 @@ Each line in the JSONL file is one record:
 ```json
 {
   "source": "https://ta.wikipedia.org/wiki/இந்தியா",
-  "paragraph": "… merged Tamil text (≥ min-words) …",
+  "paragraph": "… merged Tamil text from one URL (≥ min-words when possible) …",
   "language_code": "ta",
   "confidence": 0.98,
   "detection_method": "fasttext"
@@ -70,8 +70,8 @@ Each line in the JSONL file is one record:
 
 | Field | Description |
 |-------|-------------|
-| `source` | PDF path or URL the text came from |
-| `paragraph` | Curated text (packed to meet `--min-words`) |
+| `source` | PDF path, HTML path, or URL the text came from |
+| `paragraph` | Curated text from one source, packed to `--min-words` when possible |
 | `language_code` | Detected / target language code |
 | `confidence` | Language or script-match score (0–1) |
 | `detection_method` | `fasttext`, `script`, or `fasttext+script` |
@@ -104,7 +104,9 @@ You must also provide at least one source:
 | Argument | Description |
 |----------|-------------|
 | `--pdf PATH` | PDF file or directory (repeatable: `--pdf a.pdf --pdf dir/`). |
-| `--url URL` | Web URL (repeatable). |
+| `--html PATH` | HTML file or directory (repeatable: `--html a.html --html dir/`). |
+| `--url URL` | Web URL (repeatable). `.html` URLs use the HTML extractor; Wikipedia uses the API. |
+| `--htmls-file FILE` | Text file with one local HTML path per line (`#` comments ignored). |
 | `--urls-file FILE` | Text file with one URL per line (`#` comments ignored). |
 
 ### Output and text packing
@@ -112,7 +114,7 @@ You must also provide at least one source:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--format` | `jsonl` | `jsonl` or `csv`. |
-| `--min-words` | `500` | **Minimum words per output row.** Fragments are merged (across pages if needed) until every row’s `paragraph` has at least this many words. Does **not** filter text at scrape time. |
+| `--min-words` | `500` | **Minimum words per output row, per source.** Fragments from the same URL/PDF/HTML file are merged until a row reaches this size, then it is written. Remaining text under the limit at the end of one page is **dropped** (not merged into the next page). Does **not** filter text at scrape time. |
 
 ### Language filtering
 
@@ -129,11 +131,13 @@ You must also provide at least one source:
 
 **Wikipedia** URLs use the MediaWiki API and article-body extraction (not generic page chrome).
 
-### Wikipedia crawl (expand from seed URLs)
+### URL crawl (expand from seed URLs — Wikipedia and other sites)
+
+The same flags apply to **Wikipedia** (`/wiki/` links) and **other sites** (same-host links from article/main content; nav/footer stripped).
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--wiki-crawl-depth` | `0` | `0` = only URLs you pass. `1` = seed + pages linked from seed. `2` = one more hop. Links come from **article body** (`p`, `li`), not site-wide nav headers. |
+| `--wiki-crawl-depth` | `0` | `0` = only URLs you pass. `1` = seed + pages linked from seed. `2+` = more hops (e.g. `5` for news sites). Wikipedia: `/wiki/` links from article body. Other URLs: same-site links from article/main. |
 | `--wiki-max-pages` | `150` | Maximum Wikipedia pages to fetch in one run. Use **`0`** = no page limit. |
 | `--wiki-links-per-page` | `40` | Max `/wiki/` links to follow **from each page** during crawl. Use **`0`** = **no limit** (follow all article links on that page). |
 | `--wiki-discover-links` | `0` | Shorthand for **depth 1** with up to `N` links per page. Ignored if you set `--wiki-links-per-page` to something other than the default. Use `0` with `--wiki-crawl-depth 1` for unlimited links per page. |
@@ -319,6 +323,42 @@ python -m curation \
   --output curated_brx_sample.jsonl
 ```
 
+### Bodo news site — recursive link crawl (depth 5)
+
+Same `--wiki-crawl-*` flags work for non-Wikipedia sites (same-host links from article/main content):
+
+```bash
+python -m curation \
+  --url "https://bodo.sentinelassam.com/" \
+  --target-lang brx \
+  --wiki-crawl-depth 5 \
+  --wiki-links-per-page 0 \
+  --wiki-max-pages 500 \
+  --wiki-crawl-delay 3 \
+  --min-words 500 \
+  --output curated_bodo_news.jsonl
+```
+
+Use `--wiki-max-pages` to cap total pages (default `150`). `0` = no limit.
+
+### Project Madurai HTML (local file or URL)
+
+```bash
+# Local .html file
+python -m curation \
+  --html pmuni0001.html \
+  --target-lang ta \
+  --min-words 500 \
+  --output curated_thirukkural.jsonl
+
+# Same etext via URL (.html URLs use the HTML extractor)
+python -m curation \
+  --url "https://www.projectmadurai.org/pm_etexts/utf8/pmuni0001.html" \
+  --target-lang ta \
+  --min-words 500 \
+  --output curated_thirukkural.jsonl
+```
+
 ### PDF directory + Wikipedia seed
 
 ```bash
@@ -368,7 +408,9 @@ data_curation/
 │   ├── config.py            # Language codes and defaults
 │   ├── extractors/
 │   │   ├── pdf.py           # PDF text layer + OCR
-│   │   ├── web.py           # URLs (routes Wikipedia to API)
+│   │   ├── html.py          # Local HTML + .html URLs (Trafilatura)
+│   │   ├── web.py           # URLs (routes Wikipedia / HTML)
+│   │   ├── crawl.py         # Same-site link crawl (non-Wikipedia)
 │   │   └── wikipedia.py     # Wikipedia API + crawl
 │   ├── processing/
 │   │   ├── paragraphs.py    # Split text into fragments
@@ -398,20 +440,15 @@ data_curation/
 
 ```bash
 python -m curation --help
-```
-
 
 ```
-script to check if paragraphs length is >= 500 words
-python3 -c "                  18:55:17
-                                       import json
-                                       from pathlib import Path
-                                       rows = [json.loads(l) for l in Path('c
-urated_tamil.jsonl').read_text().splitlines() if l.strip()]
-                                       wc = [len(r['paragraph'].split()) for 
-r in rows]
-                                       short = [w for w in wc if w < 500]
-                                       print(f'rows={len(rows)}, under_500={l
-en(short)}, min={min(wc)}')
-                                       "
+python3 -c "
+import json
+from pathlib import Path
+rows = [json.loads(l) for l in Path('curated_kannada_clean.jsonl').read_text().splitlines() if l.strip()]
+wc = [len(r['paragraph'].split()) for r in rows]
+short = [w for w in wc if w < 500]
+print(f'rows={len(rows)}, under_500={len(short)}, min={min(wc) if wc else 0}')
+"
+
 ```

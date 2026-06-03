@@ -6,6 +6,7 @@ import logging
 
 import trafilatura
 
+from curation.extractors.html import extract_text_from_html_url, is_html_url
 from curation.extractors.wikipedia import extract_text_from_wikipedia, is_wikipedia_url
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,16 @@ def extract_text_from_url(
     Download a URL and return main article/body text only.
 
     Wikipedia URLs use the MediaWiki API for accurate article-body extraction.
+    URLs ending in ``.html`` / ``.htm`` use the HTML extractor (Trafilatura).
     Other URLs use Trafilatura (menus, sidebars, and image blocks excluded).
     """
     if is_wikipedia_url(url):
         logger.info("Using Wikipedia API extractor for %s", url)
         return extract_text_from_wikipedia(url, timeout=timeout)
+
+    if is_html_url(url):
+        logger.info("Using HTML extractor for %s", url)
+        return extract_text_from_html_url(url, timeout=timeout)
 
     downloaded = trafilatura.fetch_url(
         url,
