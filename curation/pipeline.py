@@ -16,6 +16,38 @@ from curation.config import (
 from curation.extractors.pdf import OcrEngine, extract_text_from_pdf
 from curation.extractors.html import extract_text_from_html_file
 from curation.extractors.web import extract_text_from_url
+from curation.extractors.bhashan_marathi import (
+    crawl_bhashan_essay_urls,
+    is_bhashan_marathi_url,
+)
+from curation.extractors.hindivyakran import (
+    crawl_hindivyakran_urls,
+    is_hindivyakran_url,
+)
+from curation.extractors.punjabi_kavita import (
+    crawl_punjabi_kavita_urls,
+    is_punjabi_kavita_url,
+)
+from curation.extractors.ninemood import (
+    crawl_ninemood_urls,
+    is_ninemood_url,
+)
+from curation.extractors.prosestaa import (
+    crawl_prosestaa_urls,
+    is_prosestaa_url,
+)
+from curation.extractors.punjabilibrary import (
+    crawl_punjabilibrary_urls,
+    is_punjabilibrary_url,
+)
+from curation.extractors.saralgujarati import (
+    crawl_saralgujarati_urls,
+    is_saralgujarati_url,
+)
+from curation.extractors.townparle import (
+    crawl_townparle_urls,
+    is_townparle_url,
+)
 from curation.extractors.crawl import configure_web_crawl_rate_limit, crawl_web_urls
 from curation.extractors.wikipedia import (
     clear_wiki_html_cache,
@@ -306,8 +338,79 @@ def _expand_urls(
     wiki_seeds = [u.strip() for u in urls if u.strip() and is_wikipedia_url(u)]
     web_seeds = [u.strip() for u in urls if u.strip() and not is_wikipedia_url(u)]
 
-    if crawl_depth <= 0:
-        return web_seeds + wiki_seeds
+    bhashan_seeds = [u for u in web_seeds if is_bhashan_marathi_url(u)]
+    hindivyakran_seeds = [
+        u for u in web_seeds if is_hindivyakran_url(u) and u not in bhashan_seeds
+    ]
+    saralgujarati_seeds = [
+        u
+        for u in web_seeds
+        if is_saralgujarati_url(u)
+        and u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+    ]
+    townparle_seeds = [
+        u
+        for u in web_seeds
+        if is_townparle_url(u)
+        and u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+        and u not in saralgujarati_seeds
+    ]
+    prosestaa_seeds = [
+        u
+        for u in web_seeds
+        if is_prosestaa_url(u)
+        and u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+        and u not in saralgujarati_seeds
+        and u not in townparle_seeds
+    ]
+    ninemood_seeds = [
+        u
+        for u in web_seeds
+        if is_ninemood_url(u)
+        and u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+        and u not in saralgujarati_seeds
+        and u not in townparle_seeds
+        and u not in prosestaa_seeds
+    ]
+    punjabilibrary_seeds = [
+        u
+        for u in web_seeds
+        if is_punjabilibrary_url(u)
+        and u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+        and u not in saralgujarati_seeds
+        and u not in townparle_seeds
+        and u not in prosestaa_seeds
+        and u not in ninemood_seeds
+    ]
+    punjabi_kavita_seeds = [
+        u
+        for u in web_seeds
+        if is_punjabi_kavita_url(u)
+        and u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+        and u not in saralgujarati_seeds
+        and u not in townparle_seeds
+        and u not in prosestaa_seeds
+        and u not in ninemood_seeds
+        and u not in punjabilibrary_seeds
+    ]
+    other_web_seeds = [
+        u
+        for u in web_seeds
+        if u not in bhashan_seeds
+        and u not in hindivyakran_seeds
+        and u not in saralgujarati_seeds
+        and u not in townparle_seeds
+        and u not in prosestaa_seeds
+        and u not in ninemood_seeds
+        and u not in punjabilibrary_seeds
+        and u not in punjabi_kavita_seeds
+    ]
 
     if max_pages <= 0:
         page_limit = 0
@@ -320,9 +423,137 @@ def _expand_urls(
 
     expanded: list[str] = []
 
-    if web_seeds:
+    if bhashan_seeds:
+        crawled_bhashan = crawl_bhashan_essay_urls(
+            bhashan_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "bhashanmarathi crawl depth=%s: %s seed(s) -> %s essay page(s)",
+            crawl_depth,
+            len(bhashan_seeds),
+            len(crawled_bhashan),
+        )
+        expanded.extend(crawled_bhashan)
+
+    if hindivyakran_seeds:
+        crawled_hindi = crawl_hindivyakran_urls(
+            hindivyakran_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "hindivyakran crawl depth=%s: %s seed(s) -> %s post page(s)",
+            crawl_depth,
+            len(hindivyakran_seeds),
+            len(crawled_hindi),
+        )
+        expanded.extend(crawled_hindi)
+
+    if saralgujarati_seeds:
+        crawled_gujarati = crawl_saralgujarati_urls(
+            saralgujarati_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "saralgujarati crawl depth=%s: %s seed(s) -> %s essay page(s)",
+            crawl_depth,
+            len(saralgujarati_seeds),
+            len(crawled_gujarati),
+        )
+        expanded.extend(crawled_gujarati)
+
+    if townparle_seeds:
+        crawled_townparle = crawl_townparle_urls(
+            townparle_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "townparle crawl depth=%s: %s seed(s) -> %s article page(s)",
+            crawl_depth,
+            len(townparle_seeds),
+            len(crawled_townparle),
+        )
+        expanded.extend(crawled_townparle)
+
+    if prosestaa_seeds:
+        crawled_prosestaa = crawl_prosestaa_urls(
+            prosestaa_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "prosestaa crawl depth=%s: %s seed(s) -> %s article page(s)",
+            crawl_depth,
+            len(prosestaa_seeds),
+            len(crawled_prosestaa),
+        )
+        expanded.extend(crawled_prosestaa)
+
+    if ninemood_seeds:
+        crawled_ninemood = crawl_ninemood_urls(
+            ninemood_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "9mood crawl depth=%s: %s seed(s) -> %s article page(s)",
+            crawl_depth,
+            len(ninemood_seeds),
+            len(crawled_ninemood),
+        )
+        expanded.extend(crawled_ninemood)
+
+    if punjabilibrary_seeds:
+        crawled_punjabi = crawl_punjabilibrary_urls(
+            punjabilibrary_seeds,
+            crawl_depth=crawl_depth,
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "punjabilibrary crawl depth=%s: %s seed(s) -> %s article page(s)",
+            crawl_depth,
+            len(punjabilibrary_seeds),
+            len(crawled_punjabi),
+        )
+        expanded.extend(crawled_punjabi)
+
+    if punjabi_kavita_seeds:
+        crawled_kavita = crawl_punjabi_kavita_urls(
+            punjabi_kavita_seeds,
+            crawl_depth=max(crawl_depth, 2),
+            max_pages=page_limit,
+            links_per_page=links_per_page,
+            timeout=timeout,
+        )
+        logger.info(
+            "punjabi-kavita crawl depth=%s: %s seed(s) -> %s story page(s)",
+            crawl_depth,
+            len(punjabi_kavita_seeds),
+            len(crawled_kavita),
+        )
+        expanded.extend(crawled_kavita)
+
+    if other_web_seeds:
         crawled_web = crawl_web_urls(
-            web_seeds,
+            other_web_seeds,
             crawl_depth=crawl_depth,
             max_pages=page_limit,
             links_per_page=links_per_page,
@@ -331,7 +562,7 @@ def _expand_urls(
         logger.info(
             "Web crawl depth=%s: %s seed(s) -> %s page(s) to extract",
             crawl_depth,
-            len(web_seeds),
+            len(other_web_seeds),
             len(crawled_web),
         )
         expanded.extend(crawled_web)
@@ -353,7 +584,66 @@ def _expand_urls(
         expanded.extend(crawled_wiki)
 
     if not expanded:
-        return web_seeds + wiki_seeds
+        return _dedupe_url_list(
+            crawl_bhashan_essay_urls(
+                bhashan_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_hindivyakran_urls(
+                hindivyakran_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_saralgujarati_urls(
+                saralgujarati_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_townparle_urls(
+                townparle_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_prosestaa_urls(
+                prosestaa_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_ninemood_urls(
+                ninemood_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_punjabilibrary_urls(
+                punjabilibrary_seeds,
+                crawl_depth=max(crawl_depth, 0),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + crawl_punjabi_kavita_urls(
+                punjabi_kavita_seeds,
+                crawl_depth=max(crawl_depth, 2),
+                max_pages=page_limit,
+                links_per_page=links_per_page,
+                timeout=timeout,
+            )
+            + other_web_seeds
+            + wiki_seeds
+        )
 
     return _dedupe_url_list(expanded)
 

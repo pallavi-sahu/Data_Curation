@@ -50,11 +50,15 @@ def extract_text_from_pdf(
 
     doc = fitz.open(path)
     try:
+        _warn_image_front_matter(path, doc)
         page_limit = ocr_max_pages or doc.page_count
         text_layer = _extract_text_layer(doc, max_pages=page_limit)
         word_count = len(text_layer.split())
         pages_used = min(doc.page_count, page_limit)
         words_per_page = word_count / max(pages_used, 1)
+
+        if word_count == 0:
+            _warn_fully_scanned_pdf(path, doc, max_pages=pages_used)
 
         if target_language and text_layer.strip():
             _warn_if_unusable_text_layer(path, text_layer, target_language)
@@ -150,6 +154,55 @@ def _normalize_line(text: str) -> str:
     """Collapse internal whitespace; strip control characters."""
     cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _page_is_image_only(page: fitz.Page) -> bool:
+    blocks = page.get_text("dict").get("blocks", [])
+    has_text = any(b.get("type") == 0 for b in blocks)
+    has_image = any(b.get("type") == 1 for b in blocks)
+    return has_image and not has_text
+
+
+def _sample_page_indices(doc: fitz.Document, *, max_pages: int | None = None) -> list[int]:
+    """Sample start, middle, and end pages (deduped) for structure checks."""
+    limit = min(doc.page_count, max_pages or doc.page_count)
+    if limit <= 0:
+        return []
+    candidates = [0, 1, 2, limit // 2, limit - 1]
+    return sorted({i for i in candidates if 0 <= i < limit})
+
+
+def _warn_image_front_matter(path: Path, doc: fitz.Document) -> None:
+    """Note when opening pages are image-only; text may still appear later."""
+    sample = min(3, doc.page_count)
+    if sample == 0:
+        return
+
+    if all(_page_is_image_only(doc[i]) for i in range(sample)):
+        logger.info(
+            "PDF '%s': first %s page(s) look like images only (covers/common in "
+            "textbooks). Extraction continues through the rest of the file.",
+            path.name,
+            sample,
+        )
+
+
+def _warn_fully_scanned_pdf(
+    path: Path, doc: fitz.Document, *, max_pages: int
+) -> None:
+    """Warn when no text was found and sampled pages across the file are image-only."""
+    indices = _sample_page_indices(doc, max_pages=max_pages)
+    if not indices:
+        return
+
+    if all(_page_is_image_only(doc[i]) for i in indices):
+        logger.warning(
+            "PDF '%s': no text layer found (sampled pages %s are image-only). "
+            "This file is likely a full scan — use --pdf-ocr or --auto-ocr "
+            "(e.g. --ocr-lang mal+eng for Malayalam).",
+            path.name,
+            ", ".join(str(i + 1) for i in indices),
+        )
 
 
 def _warn_if_unusable_text_layer(

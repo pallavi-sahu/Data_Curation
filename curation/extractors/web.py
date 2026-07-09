@@ -6,6 +6,38 @@ import logging
 
 import trafilatura
 
+from curation.extractors.bhashan_marathi import (
+    extract_essays_from_url,
+    is_bhashan_marathi_url,
+)
+from curation.extractors.hindivyakran import (
+    extract_post_from_url,
+    is_hindivyakran_url,
+)
+from curation.extractors.saralgujarati import (
+    extract_essays_from_url as extract_saralgujarati_from_url,
+    is_saralgujarati_url,
+)
+from curation.extractors.punjabi_kavita import (
+    extract_story_from_url as extract_punjabi_kavita_from_url,
+    is_punjabi_kavita_url,
+)
+from curation.extractors.punjabilibrary import (
+    extract_article_from_url as extract_punjabilibrary_from_url,
+    is_punjabilibrary_url,
+)
+from curation.extractors.ninemood import (
+    extract_article_from_url as extract_ninemood_from_url,
+    is_ninemood_url,
+)
+from curation.extractors.prosestaa import (
+    extract_article_from_url as extract_prosestaa_from_url,
+    is_prosestaa_url,
+)
+from curation.extractors.townparle import (
+    extract_article_from_url as extract_townparle_from_url,
+    is_townparle_url,
+)
 from curation.extractors.html import extract_text_from_html_url, is_html_url
 from curation.extractors.wikipedia import extract_text_from_wikipedia, is_wikipedia_url
 
@@ -28,6 +60,38 @@ def extract_text_from_url(
     if is_wikipedia_url(url):
         logger.info("Using Wikipedia API extractor for %s", url)
         return extract_text_from_wikipedia(url, timeout=timeout)
+
+    if is_bhashan_marathi_url(url):
+        logger.info("Using bhashanmarathi essay extractor for %s", url)
+        return extract_essays_from_url(url, timeout=timeout)
+
+    if is_hindivyakran_url(url):
+        logger.info("Using hindivyakran post extractor for %s", url)
+        return extract_post_from_url(url, timeout=timeout)
+
+    if is_saralgujarati_url(url):
+        logger.info("Using saralgujarati essay extractor for %s", url)
+        return extract_saralgujarati_from_url(url, timeout=timeout)
+
+    if is_townparle_url(url):
+        logger.info("Using townparle article extractor for %s", url)
+        return extract_townparle_from_url(url, timeout=timeout)
+
+    if is_prosestaa_url(url):
+        logger.info("Using prosestaa article extractor for %s", url)
+        return extract_prosestaa_from_url(url, timeout=timeout)
+
+    if is_ninemood_url(url):
+        logger.info("Using 9mood article extractor for %s", url)
+        return extract_ninemood_from_url(url, timeout=timeout)
+
+    if is_punjabilibrary_url(url):
+        logger.info("Using punjabilibrary article extractor for %s", url)
+        return extract_punjabilibrary_from_url(url, timeout=timeout)
+
+    if is_punjabi_kavita_url(url):
+        logger.info("Using punjabi-kavita story extractor for %s", url)
+        return extract_punjabi_kavita_from_url(url, timeout=timeout)
 
     if is_html_url(url):
         logger.info("Using HTML extractor for %s", url)

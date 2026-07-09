@@ -19,12 +19,17 @@ SCRIPT_RANGES: dict[str, list[tuple[int, int]]] = {
 }
 
 
-def _in_script(char: str, script: str) -> bool:
+def char_in_script(char: str, script: str) -> bool:
+    """True when ``char`` belongs to the named Indic/Arabic script block."""
     code = ord(char)
     for start, end in SCRIPT_RANGES.get(script, []):
         if start <= code <= end:
             return True
     return False
+
+
+def _in_script(char: str, script: str) -> bool:
+    return char_in_script(char, script)
 
 
 def script_character_ratio(text: str, script: str) -> float:

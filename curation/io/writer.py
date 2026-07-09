@@ -18,6 +18,45 @@ FIELDNAMES = (
 )
 
 
+def append_records(
+    records: Iterable[dict[str, Any]],
+    output_path: str | Path,
+    *,
+    output_format: OutputFormat = "jsonl",
+) -> int:
+    """Append records to an existing file (or create it). Returns rows appended."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = list(records)
+    if not rows:
+        return 0
+
+    if output_format == "jsonl":
+        _append_jsonl(rows, path)
+    elif output_format == "csv":
+        _append_csv(rows, path)
+    else:
+        raise ValueError(f"Unknown output format: {output_format}")
+
+    return len(rows)
+
+
+def _append_jsonl(rows: list[dict[str, Any]], path: Path) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _append_csv(rows: list[dict[str, Any]], path: Path) -> None:
+    write_header = not path.is_file() or path.stat().st_size == 0
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=FIELDNAMES, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in FIELDNAMES})
+
+
 def save_records(
     records: Iterable[dict[str, Any]],
     output_path: str | Path,

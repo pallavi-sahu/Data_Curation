@@ -224,5 +224,12 @@ __marimo__/
 .venv/
 # Curation outputs / inputs
 *.jsonl
+*.json
 *.pdf
 sample_page_*.png
+*.txt
+*.csv
+*.docx
+*.doc
+*.tgz
+*.bak

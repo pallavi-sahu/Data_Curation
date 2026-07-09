@@ -374,6 +374,21 @@ python -m curation \
   --output curated_thirukkural.jsonl
 ```
 
+### Many HTML URLs from a list (`tamil.txt`) → one JSONL
+
+Processes each URL separately and **appends** rows to a single file (earlier URLs are kept):
+
+```bash
+python scripts/batch_curate_urls.py \
+  --urls-file tamil.txt \
+  --target-lang ta \
+  --min-words 500 \
+  --output tamil_html_all.jsonl \
+  --delay 1
+```
+
+Use `--fresh` to wipe the output file before starting. Use `--start 100 --end 200` to resume a slice. Failed URLs are logged; the script continues.
+
 ### PDF directory + Wikipedia seed
 
 ```bash
@@ -390,19 +405,19 @@ python -m curation \
 
 ```bash
 python -m curation \
-  --url "https://ml.wikipedia.org/wiki/കേരളം" \
-  --target-lang ml \
-  --format csv \
-  --confidence 0.75 \
-  --min-words 30 \
-  --output curated_ml.csv
+  --url "https://www.maayboli.com/gulmohar/marathi-katha" \
+  --target-lang mr \
+  --wiki-crawl-depth 5 \
+  --wiki-links-per-page 0 \
+  --min-words 500 \
+  --output marathi_stories.jsonl
 ```
 
 ### Combine seeds: article + main page (explicit URLs)
 
 ```bash
 python -m curation \
-  --url "https://ta.wikipedia.org/wiki/இந்தியா" \
+  --url "https://www.maayboli.com/gulmohar/marathi-katha" \
   --url "https://ta.wikipedia.org/wiki/முதற்_பக்கம்" \
   --target-lang ta \
   --wiki-crawl-depth 1 \
@@ -461,10 +476,25 @@ python -m curation --help
 python3 -c "
 import json
 from pathlib import Path
-rows = [json.loads(l) for l in Path('curated_kannada_clean.jsonl').read_text().splitlines() if l.strip()]
+rows = [json.loads(l) for l in Path('final/bodo/bodo_tts_cleaned.jsonl').read_text().splitlines() if l.strip()]
 wc = [len(r['paragraph'].split()) for r in rows]
-short = [w for w in wc if w < 500]
-print(f'rows={len(rows)}, under_500={len(short)}, min={min(wc) if wc else 0}')
+under_300 = sum(1 for w in wc if w < 300)
+mid = sum(1 for w in wc if 300 <= w <= 450)
+over_450 = sum(1 for w in wc if w > 450)
+print(f'rows={len(rows)}, <300={under_300}, 300-450={mid}, >450={over_450}')
 "
 
 ```
+
+
+# Single language (full pipeline)
+python3 scripts/run_validation_pipeline.py --input final/gujarati/gujarati.jsonl --workers 10
+
+# All languages under final/*/
+python3 scripts/run_validation_pipeline.py --all --workers 8
+
+# Only run word filter (if validated_cleaned already exists)
+python3 scripts/run_validation_pipeline.py --input final/Assamese/assamese_validated_cleaned.jsonl --skip-validate
+
+# Only run validation/cleaning (skip word filter)
+python3 scripts/run_validation_pipeline.py --input 
