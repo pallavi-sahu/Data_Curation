@@ -8,13 +8,13 @@
  * Inside the Drive folder this run writes:
  *   {tab}_export_{yyyy-MM-dd_HHmmss}.json
  *   {locale}_files/                         ← new folder each run (Drive allows duplicate names)
- *     batch2_{locale}_script_NNNN.txt
+ *     batch3_{locale}_script_NNNN.txt
  *   {locale}_files.tgz                      ← flat .txt entries (no nested folder when extracted)
  *
  * process_batch is fixed below (same for all exports).
  *
  * Sheet: header row is auto-detected (must include Script, Edited Script,
- * Did you Edit, QA Status). Data is the rows below that header.
+ * Did you Edit? (yes/no), QA Status). Data is the rows below that header.
  * Script adds Injected? / Unique script IDs columns if missing.
  */
 
@@ -85,11 +85,11 @@ function exportActiveTab() {
     var row = values[i];
     var qa = normalize_(row[headerInfo.col.qaStatus]);
     var injected = normalize_(row[headerInfo.col.injected]);
-    if (qa !== 'accept' || (injected !== '' && injected !== 'no' && injected !== 'false')) {
+    if (!isAcceptedQa_(qa) || (injected !== '' && injected !== 'no' && injected !== 'false')) {
       continue;
     }
 
-    var didEdit = normalize_(row[headerInfo.col.didYouEdit]) === 'yes';
+    var didEdit = isYes_(row[headerInfo.col.didYouEdit]);
     var text = String(
       didEdit ? row[headerInfo.col.editedScript] : row[headerInfo.col.script]
     ).trim();
@@ -133,7 +133,7 @@ function exportActiveTab() {
 
   if (exported.length === 0) {
     if (!writeFailed) {
-      ui.alert('No eligible rows (QA Status=ACCEPT, Injected? blank, non-empty text).');
+      ui.alert('No eligible rows (QA Status=1. accepted, Injected? blank, non-empty text).');
     }
     return;
   }
@@ -179,7 +179,7 @@ function promptConfig_(ui) {
 
   var locale = ask_(
     ui,
-    'Locale name for filenames (e.g. assamese → batch2_assamese_script_0001)',
+    'Locale name for filenames (e.g. assamese → batch3_assamese_script_0001)',
     defaults.locale
   );
   if (locale === null) return { error: 'cancelled' };
@@ -195,7 +195,7 @@ function promptConfig_(ui) {
   if (!locale) return { error: 'Locale is required' };
   if (!folderId) return { error: 'Drive folder ID is required' };
 
-  var filePrefix = 'batch2_' + locale + '_script';
+  var filePrefix = 'batch3_' + locale + '_script';
 
   props.setProperties({
     tts_language: language,
@@ -354,7 +354,6 @@ function ensureTrackingColumns_(sheet, headerRow) {
   var required = {
     script: 'script',
     'edited script': 'editedScript',
-    'did you edit': 'didYouEdit',
     'qa status': 'qaStatus'
   };
 
@@ -365,6 +364,12 @@ function ensureTrackingColumns_(sheet, headerRow) {
     }
     col[required[req]] = map[req];
   }
+
+  var didYouEditCol = firstHeaderCol_(map, ['did you edit yes no', 'did you edit']);
+  if (didYouEditCol === undefined) {
+    return { error: 'Missing required header: Did you Edit? (yes/no)' };
+  }
+  col.didYouEdit = didYouEditCol;
 
   var injectedCol = firstHeaderCol_(map, ['injected']);
   if (injectedCol === undefined) {
@@ -418,6 +423,21 @@ function getNextIndex_(values, idMappingCol, filePrefix) {
     }
   }
   return max + 1;
+}
+
+/** "Did you Edit?" dropdown: "1. yes" / "2. no" (plain "yes" also works). */
+function isYes_(v) {
+  var s = normalize_(v).replace(/[^a-z]/g, '');
+  return s === 'yes';
+}
+
+/** QA Status dropdown: "1. accepted" (also accepts legacy ACCEPT / accepted). */
+function isAcceptedQa_(qa) {
+  var s = normalize_(qa);
+  if (!s) return false;
+  if (/^1\s*\.?\s*accepted$/.test(s)) return true;
+  if (s.indexOf('1.') === 0 && s.indexOf('accepted') !== -1) return true;
+  return s === 'accept' || s === 'accepted';
 }
 
 function normalize_(v) {
