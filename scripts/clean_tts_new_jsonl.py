@@ -22,10 +22,9 @@ original inputs and always writes brand new files. It splits the
       numbers, ordinals.
 
 Outputs (derived from the language stem of the input):
-  1. ``{lang}_cleaned_tts_new.jsonl`` — every kept script/chunk with an ``id``.
-       Scripts are indexed 1, 2, 3, ...; when a script is split into several
-       chunks the chunks are indexed 1.1, 1.2, ...
-  2. ``{lang}_cleaned_tts_new_check.csv`` — one row per script/chunk that still
+  1. ``{lang}_cleaned_tts_new.jsonl`` — every kept script with an ``id``
+       (indexed 1, 2, 3, ...).
+  2. ``{lang}_cleaned_tts_new_check.csv`` — one row per script that still
        contains at least one CHECK pattern. Columns: id, script, sentence1,
        sentence2, ... (only the sentences that contain a CHECK pattern).
   3. ``{lang}_cleaned_tts_new_dropped.jsonl`` — rows dropped (empty after
@@ -75,10 +74,8 @@ _strip_wiki_markup = _tts._strip_wiki_markup
 _strip_parens = _tts._strip_parens
 _cosmetic_cleanup = _tts._cosmetic_cleanup
 _normalize_whitespace = _tts._normalize_whitespace
-split_paragraph_for_tts = _tts.split_paragraph_for_tts
 paragraph_word_count = _tts.paragraph_word_count
 is_list_heavy_paragraph = _tts.is_list_heavy_paragraph
-TTSChunk = _tts.TTSChunk
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +211,6 @@ def process_file(
     output_dir: Path,
     drop_list_heavy: bool,
     list_heavy_min_markers: int,
-    split_paragraphs: bool,
     limit: int | None,
     dry_run: bool,
 ) -> dict:
@@ -229,7 +225,6 @@ def process_file(
     removal_counts: dict[str, int] = {}
 
     records_in = 0
-    records_split = 0
     script_index = 0
 
     with input_path.open(encoding="utf-8") as handle:
@@ -262,31 +257,12 @@ def process_file(
                 continue
 
             script_index += 1
-
-            if split_paragraphs:
-                chunks = split_paragraph_for_tts(cleaned)
-            else:
-                chunks = [TTSChunk(cleaned)]
-            if not chunks:
-                chunks = [TTSChunk(cleaned)]
-            if len(chunks) > 1:
-                records_split += 1
-
-            for chunk_index, chunk in enumerate(chunks, start=1):
-                if len(chunks) == 1:
-                    script_id = str(script_index)
-                else:
-                    script_id = f"{script_index}.{chunk_index}"
-
-                row = {"id": script_id}
-                row.update(record)
-                row["paragraph"] = chunk.text
-                row["_word_count"] = paragraph_word_count(chunk.text)
-                row["_input_line_number"] = line_number
-                if len(chunks) > 1:
-                    row["_split_index"] = chunk_index
-                    row["_split_from"] = len(chunks)
-                kept_records.append(row)
+            row = {"id": str(script_index)}
+            row.update(record)
+            row["paragraph"] = cleaned
+            row["_word_count"] = paragraph_word_count(cleaned)
+            row["_input_line_number"] = line_number
+            kept_records.append(row)
 
     # Build the CHECK csv rows from the kept (removal-cleaned) scripts.
     csv_rows: list[tuple[str, str, list[str]]] = []
@@ -306,8 +282,6 @@ def process_file(
         "dropped_output": str(dropped_path),
         "records_in": records_in,
         "scripts_indexed": script_index,
-        "records_split": records_split,
-        "chunks_written": len(kept_records),
         "records_dropped": len(dropped_records),
         "check_rows": len(csv_rows),
         "max_check_sentences": max_sentences,
@@ -341,12 +315,9 @@ def process_file(
     )
 
     logger.info(
-        "Done %s: %d scripts (%d chunks, %d split), %d dropped, "
-        "%d check rows (max %d sentences) -> %s",
+        "Done %s: %d scripts, %d dropped, %d check rows (max %d sentences) -> %s",
         input_path.name,
         script_index,
-        len(kept_records),
-        records_split,
         len(dropped_records),
         len(csv_rows),
         max_sentences,
@@ -389,11 +360,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Marker threshold for list-heavy detection (default: 5).",
-    )
-    parser.add_argument(
-        "--no-split",
-        action="store_true",
-        help="Skip paragraph splitting (no 1.1/1.2 sub-ids).",
     )
     parser.add_argument(
         "--limit",
@@ -446,7 +412,6 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir=output_dir,
                 drop_list_heavy=args.drop_list_heavy,
                 list_heavy_min_markers=args.list_heavy_min_markers,
-                split_paragraphs=not args.no_split,
                 limit=args.limit,
                 dry_run=args.dry_run,
             )

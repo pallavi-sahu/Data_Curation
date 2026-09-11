@@ -476,7 +476,7 @@ python -m curation --help
 python3 -c "
 import json
 from pathlib import Path
-rows = [json.loads(l) for l in Path('final/bodo/bodo_tts_cleaned.jsonl').read_text().splitlines() if l.strip()]
+rows = [json.loads(l) for l in Path('new_data_collection/urdu/final_urdu_new.jsonl').read_text().splitlines() if l.strip()]
 wc = [len(r['paragraph'].split()) for r in rows]
 under_300 = sum(1 for w in wc if w < 300)
 mid = sum(1 for w in wc if 300 <= w <= 450)

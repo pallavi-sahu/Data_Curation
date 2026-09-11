@@ -10,6 +10,8 @@ Inputs:
 
 Outputs (under ``--output-dir``, default: same dir as the list file):
   - ``{stem}_matched_raw.jsonl`` — unique matched raw records (one paragraph once)
+  - ``{stem}_unmatched.jsonl`` — scripts that did not match any raw paragraph:
+      ``{"paragraph": "<script text>", "file_name": "<txt filename>"}``
   - ``{stem}_match_report.json`` — summary match stats only
 
 Matching order (same idea as ``find_tts_cleanup_removals.py``):
@@ -310,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Indexed %d raw paragraphs", len(raw_rows))
 
     matched_raw_by_norm: dict[str, dict[str, Any]] = {}
+    unmatched_records: list[dict[str, Any]] = []
 
     counts = Counter()
     method_counts = Counter()
@@ -342,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
 
         if row is None:
             counts["unmatched"] += 1
+            unmatched_records.append(
+                {
+                    "paragraph": script_text,
+                    "file_name": filename,
+                }
+            )
             continue
 
         counts["matched"] += 1
@@ -385,9 +394,11 @@ def main(argv: list[str] | None = None) -> int:
 
     stem = list_path.stem
     matched_path = output_dir / f"{stem}_matched_raw.jsonl"
+    unmatched_path = output_dir / f"{stem}_unmatched.jsonl"
     report_path = output_dir / f"{stem}_match_report.json"
 
     write_jsonl(matched_path, list(matched_raw_by_norm.values()))
+    write_jsonl(unmatched_path, unmatched_records)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
@@ -395,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     logger.info("Wrote %d unique raw scripts → %s", len(matched_raw_by_norm), matched_path)
+    logger.info("Wrote %d unmatched scripts → %s", len(unmatched_records), unmatched_path)
     logger.info("Wrote report → %s", report_path)
     logger.info(
         "Summary: listed=%d matched=%d unmatched=%d missing_file=%d unique_raw=%d",
