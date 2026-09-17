@@ -18,5 +18,3 @@ numpy<2.0  # fastText wheels are incompatible with NumPy 2.x
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 charset-normalizer>=3.3.0
-
-pytest>=8.0
