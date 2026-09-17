@@ -34,6 +34,12 @@ SENTENCE_TERMINATOR_RUN = re.compile(
     r"[\s\u200B\u200C\u200D]*"
 )
 
+# Script-specific splitters: Devanagari/Bengali use danda, not Latin full stop.
+DANDA_TERMINATOR_RUN = re.compile(r"[\u0964\u0965]+[\s\u200B\u200C\u200D]*")
+ARABIC_TERMINATOR_RUN = re.compile(r"[\u06D4\u061F]+[\s\u200B\u200C\u200D]*")
+DANDA_SPLIT_SCRIPTS = frozenset({"devanagari", "bengali"})
+ARABIC_SPLIT_SCRIPTS = frozenset({"arabic"})
+
 URL_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s\]\)\"'<>]+",
     re.IGNORECASE,
@@ -111,15 +117,30 @@ def tokenize(text: str) -> list[str]:
     return [t for t in TOKEN_PATTERN.findall(text) if t.strip()]
 
 
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences, keeping terminal punctuation on each segment."""
+def _terminator_run_for_language(language_code: str) -> re.Pattern[str]:
+    script = expected_script(language_code)
+    if script in DANDA_SPLIT_SCRIPTS:
+        return DANDA_TERMINATOR_RUN
+    if script in ARABIC_SPLIT_SCRIPTS:
+        return ARABIC_TERMINATOR_RUN
+    return SENTENCE_TERMINATOR_RUN
+
+
+def split_sentences(text: str, language_code: str = "") -> list[str]:
+    """Split text into sentences, keeping terminal punctuation on each segment.
+
+    Devanagari and Bengali languages split on danda (। ॥) only, not Latin ``.``.
+    Arabic-script languages split on ``۔`` / ``؟``. Other languages keep the
+    mixed Indic/Latin terminator set.
+    """
     text = text.strip()
     if not text:
         return []
 
+    terminator_run = _terminator_run_for_language(language_code)
     sentences: list[str] = []
     start = 0
-    for match in SENTENCE_TERMINATOR_RUN.finditer(text):
+    for match in terminator_run.finditer(text):
         chunk = text[start : match.end()].strip()
         if chunk:
             sentences.append(chunk)

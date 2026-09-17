@@ -22,7 +22,7 @@ class ReadabilityValidator(BaseValidator):
 
     def validate(self, record: CuratedRecord, config: ValidationConfig) -> MetricResult:
         text = record.text
-        sentences = split_sentences(text)
+        sentences = split_sentences(text, record.language_code)
         sentence_lengths = [len(tokenize(s)) for s in sentences]
         mean_sentence_length = (
             sum(sentence_lengths) / len(sentence_lengths) if sentence_lengths else 0.0

@@ -272,7 +272,7 @@ def fix_unbalanced_brackets(text: str) -> tuple[str, bool]:
 
 
 def fix_terminal_punctuation(text: str, language_code: str) -> tuple[str, bool]:
-    sentences = split_sentences(text)
+    sentences = split_sentences(text, language_code)
     if not sentences:
         return text, False
 

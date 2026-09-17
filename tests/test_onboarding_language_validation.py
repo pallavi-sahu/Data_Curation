@@ -68,11 +68,23 @@ def test_existing_terminal_punctuation_is_preserved():
 
 def test_kashmiri_splits_on_arabic_stop_and_question_not_semicolon():
     text = "جملہ اول۔ جملہ دوم؟ حصہ ا؛ حصہ ب۔"
-    parts = split_sentences(text)
+    parts = split_sentences(text, "ks")
     assert len(parts) == 3
     assert parts[0].endswith("۔")
     assert parts[1].endswith("؟")
     assert "؛" in parts[2]
+
+
+def test_devanagari_languages_split_on_danda_not_full_stop():
+    text = "पहला वाक्य। दूसरा वाक्य. तीसरा वाक्य।"
+    expected = ["पहला वाक्य।", "दूसरा वाक्य. तीसरा वाक्य।"]
+    for code in ("hi", "ne", "sa", "kok", "doi"):
+        assert split_sentences(text, code) == expected
+
+
+def test_bengali_splits_on_danda_not_full_stop():
+    text = "প্রথম বাক্য। দ্বিতীয় বাক্য. তৃতীয় বাক্য।"
+    assert split_sentences(text, "bn") == ["প্রথম বাক্য।", "দ্বিতীয় বাক্য. তৃতীয় বাক্য।"]
 
 
 def _load_clean_tts_new():
@@ -89,13 +101,19 @@ def _load_clean_tts_new():
 def test_tts_review_splitter_matches_validation_splitter():
     clean_tts_new = _load_clean_tts_new()
     text = "جملہ اول۔جملہ دوم؟ حصہ ا؛ حصہ ب।"
-    assert clean_tts_new.split_sentences(text) == split_sentences(text)
+    assert clean_tts_new.split_sentences(text, "ks") == split_sentences(text, "ks")
 
 
 def test_tts_review_splits_kashmiri_without_requiring_space():
     clean_tts_new = _load_clean_tts_new()
-    parts = clean_tts_new.split_sentences("اول۔دوم؟")
+    parts = clean_tts_new.split_sentences("اول۔دوم؟", "ks")
     assert parts == ["اول۔", "دوم؟"]
+
+
+def test_tts_review_splits_hindi_on_danda_not_period():
+    clean_tts_new = _load_clean_tts_new()
+    text = "पहला। दूसरा. तीसरा।"
+    assert clean_tts_new.split_sentences(text, "hi") == ["पहला।", "दूसरा. तीसरा।"]
 
 
 def _load_export_phase_one():

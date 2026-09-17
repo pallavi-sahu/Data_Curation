@@ -26,7 +26,7 @@ class PunctuationValidator(BaseValidator):
 
     def validate(self, record: CuratedRecord, config: ValidationConfig) -> MetricResult:
         text = record.text
-        sentences = split_sentences(text)
+        sentences = split_sentences(text, record.language_code)
         tokens = tokenize(text)
 
         missing_terminal = 0
