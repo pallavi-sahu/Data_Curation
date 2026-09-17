@@ -73,3 +73,26 @@ def test_kashmiri_splits_on_arabic_stop_and_question_not_semicolon():
     assert parts[0].endswith("۔")
     assert parts[1].endswith("؟")
     assert "؛" in parts[2]
+
+
+def _load_clean_tts_new():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "clean_tts_new_jsonl.py"
+    spec = importlib.util.spec_from_file_location("clean_tts_new_jsonl", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_tts_review_splitter_matches_validation_splitter():
+    clean_tts_new = _load_clean_tts_new()
+    text = "جملہ اول۔جملہ دوم؟ حصہ ا؛ حصہ ب।"
+    assert clean_tts_new.split_sentences(text) == split_sentences(text)
+
+
+def test_tts_review_splits_kashmiri_without_requiring_space():
+    clean_tts_new = _load_clean_tts_new()
+    parts = clean_tts_new.split_sentences("اول۔دوم؟")
+    assert parts == ["اول۔", "دوم؟"]

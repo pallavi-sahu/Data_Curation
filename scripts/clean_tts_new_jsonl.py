@@ -42,7 +42,6 @@ import argparse
 import csv
 import json
 import logging
-import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -76,6 +75,8 @@ _cosmetic_cleanup = _tts._cosmetic_cleanup
 _normalize_whitespace = _tts._normalize_whitespace
 paragraph_word_count = _tts.paragraph_word_count
 is_list_heavy_paragraph = _tts.is_list_heavy_paragraph
+
+from validation.tokenization import split_sentences as split_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,6 @@ CHECK_LABELS = {
 REMOVAL_PATTERNS = [(label, pat) for label, pat in PATTERNS if label in REMOVAL_LABELS]
 CHECK_PATTERNS = [(label, pat) for label, pat in PATTERNS if label in CHECK_LABELS]
 
-# Split on a danda / sentence-final punctuation followed by whitespace.
-# (Punctuation not followed by whitespace — e.g. the dot in "3.14" — is kept.)
-_SENTENCE_SPLIT = re.compile(r"(?<=[।॥])\s+|(?<=[.!?])\s+")
-
-
 def language_stem_from_input(input_path: Path) -> str:
     stem = input_path.stem
     for suffix in _STEM_SUFFIXES:
@@ -190,10 +186,6 @@ def apply_removals(text: str, counts: dict[str, int] | None = None) -> str:
     text = _cosmetic_cleanup(text)
     text = _normalize_whitespace(text)
     return text
-
-
-def split_sentences(text: str) -> list[str]:
-    return [part.strip() for part in _SENTENCE_SPLIT.split(text) if part.strip()]
 
 
 def check_labels_in_text(text: str) -> list[str]:
