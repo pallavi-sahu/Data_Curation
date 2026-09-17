@@ -49,44 +49,16 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from validation.cleaning import remove_decorative_dot_dash_runs
+from validation.tokenization import split_sentences
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_WORDS = 800
 _DEFAULT_SPLIT_THRESHOLD = 1000
 
-# Match validation.tokenization sentence splitting for Indic/Latin text.
-SENTENCE_TERMINATOR_RUN = re.compile(
-    r"(?:"
-    r"[\u0964\u0965\u06D4\u061F\u061B\u2026!?]+"
-    r"|(?<!\d)\.(?!\d)"
-    r")"
-    r"[\s\u200B\u200C\u200D]*"
-)
-
 TOKEN_PATTERN = re.compile(
     r"[^\s\u0964\u0965\u2026\u00A0\u200B\u200C\u200D\uFEFF\.,;:!?\(\)\[\]{}\"'«»—–\-/\\|@#$%^&*+=<>~`]+"
 )
-
-
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences, keeping terminal punctuation on each segment."""
-    text = text.strip()
-    if not text:
-        return []
-
-    sentences: list[str] = []
-    start = 0
-    for match in SENTENCE_TERMINATOR_RUN.finditer(text):
-        chunk = text[start : match.end()].strip()
-        if chunk:
-            sentences.append(chunk)
-        start = match.end()
-
-    tail = text[start:].strip()
-    if tail:
-        sentences.append(tail)
-    return sentences
 
 
 def tokenize(text: str) -> list[str]:
@@ -116,6 +88,7 @@ def prune_paragraph_to_max_words(
     *,
     max_words: int,
     method: str = "split",
+    language_code: str = "",
 ) -> tuple[str, bool]:
     """Trim long paragraphs to ``max_words`` at sentence boundaries when possible."""
     if max_words <= 0:
@@ -124,7 +97,7 @@ def prune_paragraph_to_max_words(
     if paragraph_word_count(text, method=method) <= max_words:
         return text, False
 
-    sentences = split_sentences(text)
+    sentences = split_sentences(text, language_code)
     if not sentences:
         return _truncate_words(text, max_words, method=method), True
 
@@ -151,6 +124,7 @@ def _finalize_chunks(
     min_words: int,
     max_words: int,
     method: str,
+    language_code: str = "",
 ) -> list[str]:
     if not chunks:
         return []
@@ -162,6 +136,7 @@ def _finalize_chunks(
                 chunk,
                 max_words=max_words,
                 method=method,
+                language_code=language_code,
             )
         finalized.append(chunk)
 
@@ -172,6 +147,7 @@ def _finalize_chunks(
                 merged,
                 max_words=max_words,
                 method=method,
+                language_code=language_code,
             )
         finalized = finalized[:-2] + [merged]
 
@@ -185,13 +161,14 @@ def split_paragraph_into_chunks(
     max_words: int,
     target_words: int,
     method: str = "split",
+    language_code: str = "",
 ) -> list[str]:
     """Split a long paragraph into chunks at sentence boundaries.
 
     Chunks aim for ``target_words`` (default: ``min_words``) and may grow up to
     ``max_words`` when needed for sentence boundaries or oversized sentences.
     """
-    sentences = split_sentences(text)
+    sentences = split_sentences(text, language_code)
     if not sentences:
         words = (text or "").split() if method == "split" else tokenize(text)
         chunks: list[str] = []
@@ -204,7 +181,13 @@ def split_paragraph_into_chunks(
                 break
             chunks.append(" ".join(chunk_words))
             index = end
-        return _finalize_chunks(chunks, min_words=min_words, max_words=max_words, method=method)
+        return _finalize_chunks(
+            chunks,
+            min_words=min_words,
+            max_words=max_words,
+            method=method,
+            language_code=language_code,
+        )
 
     chunks = []
     bucket: list[str] = []
@@ -225,6 +208,7 @@ def split_paragraph_into_chunks(
                 sentence,
                 max_words=max_words,
                 method=method,
+                language_code=language_code,
             )
             chunks.append(truncated)
             continue
@@ -252,7 +236,13 @@ def split_paragraph_into_chunks(
         else:
             chunks[-1] = f"{chunks[-1]} {' '.join(bucket)}".strip()
 
-    return _finalize_chunks(chunks, min_words=min_words, max_words=max_words, method=method)
+    return _finalize_chunks(
+        chunks,
+        min_words=min_words,
+        max_words=max_words,
+        method=method,
+        language_code=language_code,
+    )
 
 
 _CHUNK_FIELDS = ("_chunk_index", "_chunk_total")
@@ -364,13 +354,19 @@ def process_paragraph_chunks(
     target_words: int,
     split_threshold: int,
     method: str = "split",
+    language_code: str = "",
 ) -> tuple[list[str], str]:
     """Return paragraph chunk(s) and an action label: kept, pruned, or split."""
     count = paragraph_word_count(text, method=method)
     if count <= max_words:
         return [text], "kept"
     if count <= split_threshold:
-        pruned, _ = prune_paragraph_to_max_words(text, max_words=max_words, method=method)
+        pruned, _ = prune_paragraph_to_max_words(
+            text,
+            max_words=max_words,
+            method=method,
+            language_code=language_code,
+        )
         return [pruned], "pruned"
     return split_paragraph_into_chunks(
         text,
@@ -378,6 +374,7 @@ def process_paragraph_chunks(
         max_words=max_words,
         target_words=target_words,
         method=method,
+        language_code=language_code,
     ), "split"
 
 
@@ -591,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
                     target_words=target_w,
                     split_threshold=args.split_threshold,
                     method=args.count_method,
+                    language_code=str(record.get("language_code") or ""),
                 )
 
             if action == "pruned":

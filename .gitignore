@@ -233,3 +233,5 @@ sample_page_*.png
 *.doc
 *.tgz
 *.bak
+
+.worktrees/
