@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from curation.config import LANGUAGE_SCRIPT, OCR_EASYOCR_LANG, OCR_TESSERACT_LANG
-from curation.processing.script import script_character_ratio
+from curation.processing.script import char_in_script, script_character_ratio
 from validation.cleaning import default_sentence_terminator, fix_terminal_punctuation
 from validation.config import FILENAME_TO_LANG, HIGH_RESOURCE_LANGUAGES
 from validation.io import infer_language_from_filename
@@ -24,6 +24,8 @@ def test_bengali_script_ratio_is_high():
 
 
 def test_sanskrit_vedic_and_extended_count_as_devanagari():
+    assert char_in_script("\u1CD0", "devanagari") is True
+    assert char_in_script("\uA8E0", "devanagari") is True
     text = "अग्निम्" + "\u1CD0" + "क" + "\uA8E0"
     assert script_character_ratio(text, "devanagari") == 1.0
 
