@@ -20,15 +20,15 @@ TOKEN_PATTERN = re.compile(
 # Sentence-ending punctuation across scheduled Indic languages.
 # · Danda (। ॥) — Devanagari languages + widely used in digital text for
 #   Gujarati, Bengali, Assamese, Odia, Tamil, Telugu, Kannada, Malayalam, Punjabi
-# · Arabic full stop (۔) + ؟ — Urdu, Sindhi, Kashmiri (Arabic script)
+# · Arabic full stop (۔) and question mark (؟) — Urdu, Sindhi, Kashmiri (Arabic script)
 # · Latin . ! ? … — universal fallback in scraped web text
-SENTENCE_TERMINATORS = frozenset(".\u0964\u0965\u06D4\u061F\u061B\u2026!?")
+SENTENCE_TERMINATORS = frozenset(".\u0964\u0965\u06D4\u061F\u2026!?")
 
 # Split after terminators; whitespace after punct is optional (common in Indic text).
 # Latin period is excluded between digits (e.g. 1.47.0-wmf.4, 3.14).
 SENTENCE_TERMINATOR_RUN = re.compile(
     r"(?:"
-    r"[\u0964\u0965\u06D4\u061F\u061B\u2026!?]+"
+    r"[\u0964\u0965\u06D4\u061F\u2026!?]+"
     r"|(?<!\d)\.(?!\d)"
     r")"
     r"[\s\u200B\u200C\u200D]*"

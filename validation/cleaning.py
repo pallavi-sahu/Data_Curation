@@ -43,11 +43,14 @@ _ARABIC_STOP_LANGS = frozenset({"ur", "sd", "ks"})
 _INDIC_LANGS = frozenset(
     {
         "as",
+        "bn",
         "brx",
+        "doi",
         "gu",
         "hi",
         "kn",
         "ks",
+        "kok",
         "mai",
         "ml",
         "mni",

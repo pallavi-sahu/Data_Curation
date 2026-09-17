@@ -49,44 +49,16 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from validation.cleaning import remove_decorative_dot_dash_runs
+from validation.tokenization import split_sentences
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_WORDS = 800
 _DEFAULT_SPLIT_THRESHOLD = 1000
 
-# Match validation.tokenization sentence splitting for Indic/Latin text.
-SENTENCE_TERMINATOR_RUN = re.compile(
-    r"(?:"
-    r"[\u0964\u0965\u06D4\u061F\u061B\u2026!?]+"
-    r"|(?<!\d)\.(?!\d)"
-    r")"
-    r"[\s\u200B\u200C\u200D]*"
-)
-
 TOKEN_PATTERN = re.compile(
     r"[^\s\u0964\u0965\u2026\u00A0\u200B\u200C\u200D\uFEFF\.,;:!?\(\)\[\]{}\"'«»—–\-/\\|@#$%^&*+=<>~`]+"
 )
-
-
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences, keeping terminal punctuation on each segment."""
-    text = text.strip()
-    if not text:
-        return []
-
-    sentences: list[str] = []
-    start = 0
-    for match in SENTENCE_TERMINATOR_RUN.finditer(text):
-        chunk = text[start : match.end()].strip()
-        if chunk:
-            sentences.append(chunk)
-        start = match.end()
-
-    tail = text[start:].strip()
-    if tail:
-        sentences.append(tail)
-    return sentences
 
 
 def tokenize(text: str) -> list[str]:

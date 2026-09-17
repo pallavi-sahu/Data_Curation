@@ -33,3 +33,43 @@ def test_sanskrit_vedic_and_extended_count_as_devanagari():
 def test_kashmiri_arabic_extended_count_as_arabic():
     text = "کٲشُر" + "\u08A0"
     assert script_character_ratio(text, "arabic") == 1.0
+
+
+def test_preferred_terminators_for_onboarding_languages():
+    assert default_sentence_terminator("ks") == "\u06D4"
+    for code in ("hi", "bn", "kok", "doi", "sa", "ne"):
+        assert default_sentence_terminator(code) == "\u0964"
+    assert default_sentence_terminator("") == "."
+    assert default_sentence_terminator("xx") == "."
+
+
+def test_missing_punctuation_gets_language_terminator():
+    hindi, changed_hi = fix_terminal_punctuation("यह एक वाक्य है", "hi")
+    assert changed_hi
+    assert hindi.endswith("\u0964")
+    kashmiri, changed_ks = fix_terminal_punctuation("یہ جملہ ہے", "ks")
+    assert changed_ks
+    assert kashmiri.endswith("\u06D4")
+    bengali, changed_bn = fix_terminal_punctuation("এটি একটি বাক্য", "bn")
+    assert changed_bn
+    assert bengali.endswith("\u0964")
+
+
+def test_existing_terminal_punctuation_is_preserved():
+    text = "यह पहले से पूरा है।"
+    fixed, changed = fix_terminal_punctuation(text, "hi")
+    assert changed is False
+    assert fixed.endswith("।")
+    latin = "This already ends."
+    fixed_latin, changed_latin = fix_terminal_punctuation(latin, "hi")
+    assert changed_latin is False
+    assert fixed_latin.endswith(".")
+
+
+def test_kashmiri_splits_on_arabic_stop_and_question_not_semicolon():
+    text = "جملہ اول۔ جملہ دوم؟ حصہ ا؛ حصہ ب۔"
+    parts = split_sentences(text)
+    assert len(parts) == 3
+    assert parts[0].endswith("۔")
+    assert parts[1].endswith("؟")
+    assert "؛" in parts[2]
