@@ -96,3 +96,32 @@ def test_tts_review_splits_kashmiri_without_requiring_space():
     clean_tts_new = _load_clean_tts_new()
     parts = clean_tts_new.split_sentences("اول۔دوم؟")
     assert parts == ["اول۔", "دوم؟"]
+
+
+def _load_export_phase_one():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "export_phase_one_dataset.py"
+    spec = importlib.util.spec_from_file_location("export_phase_one_dataset", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_filename_inference_for_onboarding_languages():
+    export_phase_one = _load_export_phase_one()
+    expected = {
+        "hindi": "hi",
+        "bengali": "bn",
+        "kashmiri": "ks",
+        "konkani": "kok",
+        "dogri": "doi",
+        "sanskrit": "sa",
+        "nepali": "ne",
+    }
+    for name, code in expected.items():
+        assert FILENAME_TO_LANG[name] == code
+        assert infer_language_from_filename(Path(f"{name}.jsonl")) == code
+        assert export_phase_one.FILENAME_TO_LANG[name] == code
+        assert code not in HIGH_RESOURCE_LANGUAGES
