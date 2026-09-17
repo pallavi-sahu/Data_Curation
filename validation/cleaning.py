@@ -43,14 +43,11 @@ _ARABIC_STOP_LANGS = frozenset({"ur", "sd", "ks"})
 _INDIC_LANGS = frozenset(
     {
         "as",
-        "bn",
         "brx",
-        "doi",
         "gu",
         "hi",
         "kn",
         "ks",
-        "kok",
         "mai",
         "ml",
         "mni",
@@ -272,7 +269,7 @@ def fix_unbalanced_brackets(text: str) -> tuple[str, bool]:
 
 
 def fix_terminal_punctuation(text: str, language_code: str) -> tuple[str, bool]:
-    sentences = split_sentences(text, language_code)
+    sentences = split_sentences(text)
     if not sentences:
         return text, False
 

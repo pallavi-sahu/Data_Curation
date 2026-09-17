@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Inclusive Unicode ranges per script (BMP blocks used by scheduled Indic languages).
 SCRIPT_RANGES: dict[str, list[tuple[int, int]]] = {
-    "devanagari": [(0x0900, 0x097F), (0xA8E0, 0xA8FF), (0x1CD0, 0x1CFF)],
+    "devanagari": [(0x0900, 0x097F)],
     "bengali": [(0x0980, 0x09FF)],
     "gurmukhi": [(0x0A00, 0x0A7F)],
     "gujarati": [(0x0A80, 0x0AFF)],
@@ -15,12 +15,7 @@ SCRIPT_RANGES: dict[str, list[tuple[int, int]]] = {
     "malayalam": [(0x0D00, 0x0D7F)],
     "ol_chiki": [(0x1C50, 0x1C7F)],
     "meetei_mayek": [(0xABC0, 0xABFF), (0xAA00, 0xAA5F)],
-    "arabic": [
-        (0x0600, 0x06FF),
-        (0x0750, 0x077F),
-        (0x0870, 0x089F),
-        (0x08A0, 0x08FF),
-    ],
+    "arabic": [(0x0600, 0x06FF), (0x0750, 0x077F)],
 }
 
 
