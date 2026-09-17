@@ -125,3 +125,12 @@ def test_filename_inference_for_onboarding_languages():
         assert infer_language_from_filename(Path(f"{name}.jsonl")) == code
         assert export_phase_one.FILENAME_TO_LANG[name] == code
         assert code not in HIGH_RESOURCE_LANGUAGES
+
+
+def test_ocr_defaults_match_selected_scripts():
+    assert OCR_TESSERACT_LANG["ks"] == "urd+eng"
+    assert OCR_EASYOCR_LANG["ks"] == ["ur", "en"]
+    assert OCR_EASYOCR_LANG["kok"] == ["gom", "en"]
+    assert OCR_EASYOCR_LANG["sa"] == ["sa", "en"]
+    assert OCR_EASYOCR_LANG["ne"] == ["ne", "en"]
+    assert OCR_EASYOCR_LANG["doi"] == ["hi", "en"]
