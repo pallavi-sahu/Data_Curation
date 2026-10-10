@@ -14,22 +14,70 @@
  * process_batch is fixed below (same for all exports).
  *
  * Sheet: header row is auto-detected (must include Script, Edited Script,
- * Did you Edit? (yes/no), QA Status). Data is the rows below that header.
+ * QA Status). Data is the rows below that header. Export always uses
+ * Edited Script (Did you Edit? is ignored). If Edited Script is empty,
+ * that row is left unchanged (not exported, not marked Injected).
  * Script adds Injected? / Unique script IDs columns if missing.
+ *
+ * Large sheets: Apps Script kills any execution at 6 minutes. A run stops
+ * itself at MAX_RUNTIME_MS, saves progress, and schedules a trigger that
+ * picks up where it left off, repeating until every row is done. The .txt
+ * files are written as it goes; the combined JSON and .tgz are produced in
+ * a final pass. Progress lives in DocumentProperties, so closing the sheet
+ * does not interrupt it.
  */
 
 /** Same for every datapoint / language — change here if needed. */
 var PROCESS_BATCH = 'NRB0001';
 
+/** Stop and reschedule this far into a run (hard platform limit is 6 min). */
+var MAX_RUNTIME_MS = 4.5 * 60 * 1000;
+/** Don't start building the JSON + archive with less than this left. */
+var FINALIZE_RESERVE_MS = 2 * 60 * 1000;
+/** Rows between progress checkpoints (staging file + sheet write). */
+var FLUSH_EVERY_ROWS = 50;
+var RESUME_DELAY_MS = 60 * 1000;
+/** Fires only if a run is killed before it can reschedule itself. */
+var WATCHDOG_DELAY_MS = 7 * 60 * 1000;
+/** Long enough that progress toasts overlap instead of leaving blank gaps. */
+var PROGRESS_TOAST_SECONDS = 45;
+
+var CONTINUE_HANDLER = 'continueTtsExport';
+var STATE_KEY = 'tts_run_state';
+var SUMMARY_KEY = 'tts_last_summary';
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Export TTS')
     .addItem('Export active tab', 'exportActiveTab')
+    .addItem('Resume unfinished export', 'resumeTtsExport')
+    .addItem('Cancel unfinished export', 'cancelTtsExport')
     .addToUi();
+  showPendingSummary_();
 }
 
 function exportActiveTab() {
   var ui = SpreadsheetApp.getUi();
+
+  var existing = loadState_();
+  if (existing) {
+    var answer = ui.alert(
+      'An export is already in progress',
+      existing.totalExported + ' script(s) written so far for tab "' + existing.sheetName + '".\n\n' +
+        'Yes — resume it now\n' +
+        'No — discard it and start a new export (those rows stay marked Injected?=yes, ' +
+        'so they will NOT be in the new JSON or archive)\n' +
+        'Cancel — do nothing',
+      ui.ButtonSet.YES_NO_CANCEL
+    );
+    if (answer !== ui.Button.YES && answer !== ui.Button.NO) return;
+    if (answer === ui.Button.YES) {
+      runExportChunk_(true);
+      return;
+    }
+    clearRun_(existing);
+  }
+
   var sheet = SpreadsheetApp.getActiveSheet();
 
   var config = promptConfig_(ui);
@@ -64,102 +112,444 @@ function exportActiveTab() {
     return;
   }
 
-  var lastRow = sheet.getLastRow();
-  if (lastRow < layout.dataStartRow) {
+  if (sheet.getLastRow() < layout.dataStartRow) {
     ui.alert('No data rows found.');
     return;
   }
 
-  var numRows = lastRow - layout.dataStartRow + 1;
-  var width = sheet.getLastColumn();
-  var values = sheet.getRange(layout.dataStartRow, 1, numRows, width).getValues();
-
-  var nextIndex = getNextIndex_(values, headerInfo.col.idMapping, config.filePrefix);
-  var exported = [];
-  var tarEntries = [];
-  var writeFailed = false;
-  var filesFolder = null;
+  var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmmss');
   var filesFolderName = config.locale + '_files';
 
-  for (var i = 0; i < values.length; i++) {
-    var row = values[i];
-    var qa = normalize_(row[headerInfo.col.qaStatus]);
-    var injected = normalize_(row[headerInfo.col.injected]);
-    if (!isAcceptedQa_(qa) || (injected !== '' && injected !== 'no' && injected !== 'false')) {
-      continue;
-    }
+  saveState_({
+    phase: 'export',
+    ssId: SpreadsheetApp.getActiveSpreadsheet().getId(),
+    sheetId: sheet.getSheetId(),
+    sheetName: sheet.getName(),
+    language: config.language,
+    locale: config.locale,
+    filePrefix: config.filePrefix,
+    processBatch: config.processBatch,
+    parentFolderId: config.folderId,
+    filesFolderId: parentFolder.createFolder(filesFolderName).getId(),
+    filesFolderName: filesFolderName,
+    stageFolderId: parentFolder.createFolder('tts_export_staging_' + stamp).getId(),
+    stamp: stamp,
+    partCount: 0,
+    totalExported: 0
+  });
 
-    var didEdit = isYes_(row[headerInfo.col.didYouEdit]);
-    var text = String(
-      didEdit ? row[headerInfo.col.editedScript] : row[headerInfo.col.script]
-    ).trim();
-    if (!text) {
-      continue;
-    }
+  runExportChunk_(true);
+}
 
-    var stem = config.filePrefix + '_' + pad4_(nextIndex);
-    var fileName = stem + '.txt';
-    var sheetRow = layout.dataStartRow + i;
+/** Menu action: continue a run by hand instead of waiting for the trigger. */
+function resumeTtsExport() {
+  runExportChunk_(true);
+}
 
-    try {
-      if (!filesFolder) {
-        filesFolder = parentFolder.createFolder(filesFolderName);
-      }
-      filesFolder.createFile(fileName, text, MimeType.PLAIN_TEXT);
-    } catch (err) {
-      writeFailed = true;
-      ui.alert('Failed writing ' + fileName + ' at sheet row ' + sheetRow + ':\n' + err);
-      break;
-    }
+/** Trigger target. Must stay public — Apps Script cannot call private (_) handlers. */
+function continueTtsExport() {
+  runExportChunk_(false);
+}
 
-    sheet.getRange(sheetRow, headerInfo.col.injected + 1).setValue('yes');
-    sheet.getRange(sheetRow, headerInfo.col.idMapping + 1).setValue(stem);
-
-    tarEntries.push({ name: fileName, content: text });
-
-    exported.push({
-      data: {
-        file_name: fileName,
-        language: config.language,
-        process_batch: config.processBatch
-      },
-      files: {
-        script_file: fileName
-      }
-    });
-
-    nextIndex += 1;
+function cancelTtsExport() {
+  var ui = SpreadsheetApp.getUi();
+  var state = loadState_();
+  if (!state) {
+    ui.alert('No export in progress.');
+    return;
   }
+  var written = state.totalExported;
+  clearRun_(state);
+  ui.alert(
+    'Cancelled. ' + written + ' .txt file(s) already in ' + state.filesFolderName +
+    ' were kept, and those rows stay marked Injected?=yes. No JSON or archive was produced.'
+  );
+}
 
-  if (exported.length === 0) {
-    if (!writeFailed) {
-      ui.alert('No eligible rows (QA Status=1. accepted, Injected? blank, non-empty text).');
-    }
+/**
+ * Export as many rows as fit in one execution, then either reschedule
+ * itself or move on to building the JSON + archive.
+ */
+function runExportChunk_(interactive) {
+  var deadline = Date.now() + MAX_RUNTIME_MS;
+
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(1000)) {
+    notify_(interactive, 'Another export run is still going. Try again in a minute.');
     return;
   }
 
-  var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmmss');
-  var jsonName = sheet.getName() + '_export_' + stamp + '.json';
-  var jsonBody = JSON.stringify(exported, null, 2);
-  parentFolder.createFile(jsonName, jsonBody, MimeType.PLAIN_TEXT);
-
-  var tgzName = filesFolderName + '.tgz';
   try {
-    parentFolder.createFile(buildFlatTgz_(tarEntries, tgzName));
+    var state = loadState_();
+    if (!state) {
+      notify_(interactive, 'No export in progress. Use "Export active tab" to start one.');
+      return;
+    }
+
+    scheduleTrigger_(WATCHDOG_DELAY_MS);
+
+    var ss = SpreadsheetApp.openById(state.ssId);
+
+    if (state.phase === 'finalize') {
+      progress_(ss, 'Building the JSON and archive from ' + state.totalExported + ' script(s)…');
+      finalize_(state, interactive, ss);
+      return;
+    }
+
+    var sheet = sheetById_(ss, state.sheetId);
+    if (!sheet) {
+      halt_(interactive, 'Tab "' + state.sheetName + '" no longer exists. Export paused.');
+      return;
+    }
+
+    progress_(
+      ss,
+      state.totalExported
+        ? 'Resuming export — ' + state.totalExported + ' script(s) done so far…'
+        : 'Starting export…'
+    );
+
+    var layout = detectHeaderRow_(sheet);
+    if (layout.error) {
+      halt_(interactive, layout.error);
+      return;
+    }
+
+    var headerInfo = ensureTrackingColumns_(sheet, layout.headerRow);
+    if (headerInfo.error) {
+      halt_(interactive, headerInfo.error);
+      return;
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < layout.dataStartRow) {
+      state.phase = 'finalize';
+      saveState_(state);
+      finalize_(state, interactive, ss);
+      return;
+    }
+
+    var numRows = lastRow - layout.dataStartRow + 1;
+    var values = sheet.getRange(layout.dataStartRow, 1, numRows, sheet.getLastColumn()).getValues();
+    // Rows finished by earlier chunks already carry Injected?=yes and an ID,
+    // so re-reading the sheet is what makes a resumed run pick up correctly.
+    var nextIndex = getNextIndex_(values, headerInfo.col.idMapping, state.filePrefix);
+
+    var filesFolder = DriveApp.getFolderById(state.filesFolderId);
+    var stageFolder = DriveApp.getFolderById(state.stageFolderId);
+    var writer = newSheetWriter_(sheet, layout.dataStartRow, values, headerInfo.col);
+    var pending = [];
+    var outOfTime = false;
+
+    for (var i = 0; i < values.length; i++) {
+      var row = values[i];
+      var qa = normalize_(row[headerInfo.col.qaStatus]);
+      var injected = normalize_(row[headerInfo.col.injected]);
+      if (!isAcceptedQa_(qa) || (injected !== '' && injected !== 'no' && injected !== 'false')) {
+        continue;
+      }
+
+      var text = String(row[headerInfo.col.editedScript] || '').trim();
+      if (!text) {
+        // Leave the row as-is until Edited Script is filled in.
+        continue;
+      }
+
+      var stem = state.filePrefix + '_' + pad4_(nextIndex);
+      var fileName = stem + '.txt';
+
+      try {
+        filesFolder.createFile(fileName, text, MimeType.PLAIN_TEXT);
+      } catch (err) {
+        checkpoint_(state, stageFolder, pending, writer);
+        halt_(
+          interactive,
+          'Failed writing ' + fileName + ' at sheet row ' + (layout.dataStartRow + i) + ':\n' + err +
+            '\n\n' + state.totalExported + ' script(s) exported so far. Fix the problem and use ' +
+            '"Resume unfinished export".'
+        );
+        return;
+      }
+
+      writer.mark(i, stem);
+      pending.push({ name: fileName, content: text });
+      nextIndex += 1;
+      state.totalExported += 1;
+
+      if (pending.length >= FLUSH_EVERY_ROWS) {
+        checkpoint_(state, stageFolder, pending, writer);
+        pending = [];
+        progress_(ss, 'Exporting… ' + state.totalExported + ' script(s) written.');
+        if (Date.now() > deadline) {
+          outOfTime = true;
+          break;
+        }
+      }
+    }
+
+    checkpoint_(state, stageFolder, pending, writer);
+
+    if (outOfTime) {
+      scheduleTrigger_(RESUME_DELAY_MS);
+      notify_(
+        interactive,
+        'Paused before the 6-minute limit with ' + state.totalExported + ' script(s) exported.\n' +
+          'It resumes automatically in about a minute — you can close the sheet.'
+      );
+      return;
+    }
+
+    state.phase = 'finalize';
+    saveState_(state);
+
+    if (Date.now() + FINALIZE_RESERVE_MS < deadline) {
+      progress_(ss, 'All rows exported. Building the JSON and archive…');
+      finalize_(state, interactive, ss);
+    } else {
+      scheduleTrigger_(RESUME_DELAY_MS);
+      notify_(
+        interactive,
+        'All ' + state.totalExported + ' script(s) exported. Building the JSON and archive in about a minute.'
+      );
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Build the combined manifest + archive from everything staged across runs. */
+function finalize_(state, interactive, ss) {
+  var parentFolder = DriveApp.getFolderById(state.parentFolderId);
+  var entries = readStagedEntries_(DriveApp.getFolderById(state.stageFolderId));
+
+  if (entries.length === 0) {
+    clearRun_(state);
+    notify_(interactive, 'No eligible rows (QA Status=1. accepted, Injected? blank, non-empty Edited Script).');
+    return;
+  }
+
+  var manifest = [];
+  for (var i = 0; i < entries.length; i++) {
+    manifest.push({
+      data: {
+        file_name: entries[i].name,
+        language: state.language,
+        process_batch: state.processBatch
+      },
+      files: {
+        script_file: entries[i].name
+      }
+    });
+  }
+
+  var jsonName = state.sheetName + '_export_' + state.stamp + '.json';
+  if (!state.jsonWritten) {
+    parentFolder.createFile(jsonName, JSON.stringify(manifest, null, 2), MimeType.PLAIN_TEXT);
+    state.jsonWritten = true;
+    saveState_(state);
+  }
+
+  var tgzName = state.filesFolderName + '.tgz';
+  try {
+    progress_(ss, 'Compressing ' + entries.length + ' script(s) into ' + tgzName + '…');
+    parentFolder.createFile(buildFlatTgz_(entries, tgzName));
   } catch (tgzErr) {
-    ui.alert(
-      'Exported ' + exported.length + ' script(s) and JSON, but failed creating ' + tgzName + ':\n' + tgzErr
+    halt_(
+      interactive,
+      'Exported ' + entries.length + ' script(s) and JSON, but failed creating ' + tgzName + ':\n' + tgzErr +
+        '\n\nUse "Resume unfinished export" to retry the archive.'
     );
     return;
   }
 
-  ui.alert(
-    'Exported ' + exported.length + ' script(s).\n' +
-    'JSON: ' + jsonName + '\n' +
-    'TXT folder: ' + filesFolderName + '\n' +
-    'Archive: ' + tgzName + ' (flat — extract puts .txt in current dir)\n' +
-    'Parent folder: ' + parentFolder.getName()
+  clearRun_(state);
+  notify_(
+    interactive,
+    'Exported ' + entries.length + ' script(s).\n' +
+      'JSON: ' + jsonName + '\n' +
+      'TXT folder: ' + state.filesFolderName + '\n' +
+      'Archive: ' + tgzName + ' (flat — extract puts .txt in current dir)\n' +
+      'Parent folder: ' + parentFolder.getName()
   );
+}
+
+/**
+ * Persist progress: staged text first, then the sheet. If the execution dies
+ * in between, the rows are simply re-exported next run and readStagedEntries_
+ * drops the duplicates.
+ */
+function checkpoint_(state, stageFolder, pending, writer) {
+  if (pending.length) {
+    state.partCount += 1;
+    stageFolder.createFile(
+      'part_' + pad6_(state.partCount) + '.json',
+      JSON.stringify(pending),
+      MimeType.PLAIN_TEXT
+    );
+  }
+  writer.flush();
+  saveState_(state);
+}
+
+/**
+ * Collects Injected? / Unique script IDs updates and writes them as two range
+ * writes per checkpoint instead of two API calls per row.
+ */
+function newSheetWriter_(sheet, dataStartRow, values, col) {
+  var injected = [];
+  var ids = [];
+  for (var i = 0; i < values.length; i++) {
+    injected.push([values[i][col.injected]]);
+    ids.push([values[i][col.idMapping]]);
+  }
+
+  var minDirty = -1;
+  var maxDirty = -1;
+
+  return {
+    mark: function (i, stem) {
+      injected[i] = ['yes'];
+      ids[i] = [stem];
+      if (minDirty === -1 || i < minDirty) minDirty = i;
+      if (i > maxDirty) maxDirty = i;
+    },
+    flush: function () {
+      if (minDirty === -1) return;
+      var count = maxDirty - minDirty + 1;
+      var startRow = dataStartRow + minDirty;
+      sheet.getRange(startRow, col.injected + 1, count, 1)
+        .setValues(injected.slice(minDirty, maxDirty + 1));
+      sheet.getRange(startRow, col.idMapping + 1, count, 1)
+        .setValues(ids.slice(minDirty, maxDirty + 1));
+      SpreadsheetApp.flush();
+      minDirty = -1;
+      maxDirty = -1;
+    }
+  };
+}
+
+/** Staged chunks in write order, first occurrence of each filename wins. */
+function readStagedEntries_(stageFolder) {
+  var parts = [];
+  var files = stageFolder.getFiles();
+  while (files.hasNext()) {
+    var file = files.next();
+    var m = file.getName().match(/^part_(\d+)\.json$/);
+    if (m) {
+      parts.push({ order: parseInt(m[1], 10), file: file });
+    }
+  }
+  parts.sort(function (a, b) {
+    return a.order - b.order;
+  });
+
+  var seen = {};
+  var entries = [];
+  for (var i = 0; i < parts.length; i++) {
+    var rows = JSON.parse(parts[i].file.getBlob().getDataAsString('UTF-8'));
+    for (var j = 0; j < rows.length; j++) {
+      var name = rows[j].name;
+      if (seen[name]) continue;
+      seen[name] = true;
+      entries.push({ name: name, content: rows[j].content });
+    }
+  }
+  return entries;
+}
+
+function loadState_() {
+  var raw = PropertiesService.getDocumentProperties().getProperty(STATE_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveState_(state) {
+  PropertiesService.getDocumentProperties().setProperty(STATE_KEY, JSON.stringify(state));
+}
+
+function clearRun_(state) {
+  deleteContinueTriggers_();
+  PropertiesService.getDocumentProperties().deleteProperty(STATE_KEY);
+  if (state && state.stageFolderId) {
+    try {
+      DriveApp.getFolderById(state.stageFolderId).setTrashed(true);
+    } catch (e) {
+      // Staging folder already gone; nothing to clean up.
+    }
+  }
+}
+
+/** Stop without rescheduling, but keep the state so the user can resume. */
+function halt_(interactive, message) {
+  deleteContinueTriggers_();
+  notify_(interactive, message);
+}
+
+function scheduleTrigger_(delayMs) {
+  deleteContinueTriggers_();
+  ScriptApp.newTrigger(CONTINUE_HANDLER).timeBased().after(delayMs).create();
+}
+
+function deleteContinueTriggers_() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === CONTINUE_HANDLER) {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+}
+
+/**
+ * Live progress in the sheet. Google's own "Running script…" banner only
+ * appears for menu-initiated runs, so background chunks would otherwise look
+ * like nothing is happening.
+ */
+function progress_(spreadsheet, message) {
+  if (!spreadsheet) return;
+  try {
+    spreadsheet.toast(message, 'TTS export', PROGRESS_TOAST_SECONDS);
+  } catch (e) {
+    // Nobody has the sheet open; there is nothing to show.
+  }
+}
+
+/** Trigger runs have no UI, so fall back to a toast plus a message shown on next open. */
+function notify_(interactive, message) {
+  if (interactive) {
+    try {
+      SpreadsheetApp.getUi().alert(message);
+      return;
+    } catch (e) {
+      // No UI available; fall through to the toast.
+    }
+  }
+  PropertiesService.getDocumentProperties().setProperty(SUMMARY_KEY, message);
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'TTS export', 30);
+  } catch (e) {
+    // Sheet not open; the message waits in SUMMARY_KEY.
+  }
+  Logger.log(message);
+}
+
+function showPendingSummary_() {
+  var props = PropertiesService.getDocumentProperties();
+  var summary = props.getProperty(SUMMARY_KEY);
+  if (!summary) return;
+  props.deleteProperty(SUMMARY_KEY);
+  SpreadsheetApp.getActiveSpreadsheet().toast(summary, 'TTS export', 60);
+}
+
+function sheetById_(spreadsheet, sheetId) {
+  var sheets = spreadsheet.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getSheetId() === sheetId) return sheets[i];
+  }
+  return null;
 }
 
 /**
@@ -310,22 +700,30 @@ function padOctal_(n, width) {
   return s;
 }
 
+var ZERO_CACHE_ = null;
+
 function zeroBytes_(n) {
-  var a = [];
-  for (var i = 0; i < n; i++) a.push(0);
-  return a;
+  if (!ZERO_CACHE_ || ZERO_CACHE_.length < n) {
+    ZERO_CACHE_ = [];
+    for (var i = 0; i < n; i++) ZERO_CACHE_.push(0);
+  }
+  // slice() so callers can mutate their copy (tarHeaderBytes_ does).
+  return ZERO_CACHE_.slice(0, n);
 }
 
 function concatBytes_(chunks) {
-  var total = 0;
-  for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+  // push.apply in slices beats per-element assignment, which matters once the
+  // archive reaches megabytes.
+  var MAX_ARGS = 20000;
   var out = [];
-  out.length = total;
-  var pos = 0;
   for (var c = 0; c < chunks.length; c++) {
     var chunk = chunks[c];
-    for (var j = 0; j < chunk.length; j++) {
-      out[pos++] = chunk[j];
+    if (chunk.length <= MAX_ARGS) {
+      Array.prototype.push.apply(out, chunk);
+      continue;
+    }
+    for (var s = 0; s < chunk.length; s += MAX_ARGS) {
+      Array.prototype.push.apply(out, chunk.slice(s, s + MAX_ARGS));
     }
   }
   return out;
@@ -364,12 +762,6 @@ function ensureTrackingColumns_(sheet, headerRow) {
     }
     col[required[req]] = map[req];
   }
-
-  var didYouEditCol = firstHeaderCol_(map, ['did you edit yes no', 'did you edit']);
-  if (didYouEditCol === undefined) {
-    return { error: 'Missing required header: Did you Edit? (yes/no)' };
-  }
-  col.didYouEdit = didYouEditCol;
 
   var injectedCol = firstHeaderCol_(map, ['injected']);
   if (injectedCol === undefined) {
@@ -425,12 +817,6 @@ function getNextIndex_(values, idMappingCol, filePrefix) {
   return max + 1;
 }
 
-/** "Did you Edit?" dropdown: "1. yes" / "2. no" (plain "yes" also works). */
-function isYes_(v) {
-  var s = normalize_(v).replace(/[^a-z]/g, '');
-  return s === 'yes';
-}
-
 /** QA Status dropdown: "1. accepted" (also accepts legacy ACCEPT / accepted). */
 function isAcceptedQa_(qa) {
   var s = normalize_(qa);
@@ -452,6 +838,12 @@ function headerKey_(v) {
 function pad4_(n) {
   var s = String(n);
   while (s.length < 4) s = '0' + s;
+  return s;
+}
+
+function pad6_(n) {
+  var s = String(n);
+  while (s.length < 6) s = '0' + s;
   return s;
 }
 
