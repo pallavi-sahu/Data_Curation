@@ -32,10 +32,12 @@ flowchart TD
   phase2["Phase 2: TTS noise cleanup<br/>clean_tts_new_jsonl.py"]
   gemini["Gemini keep / delete on leftover numbers"]
   size["Merge or split to 300–450 words"]
+  native["Gemini: drop paragraphs<br/>with too many foreign words"]
+  dedupe["Drop duplicate paragraphs"]
   sheet["Google Sheet manual QA"]
   drive["JSON + flat .tgz of .txt scripts"]
 
-  sources --> collect --> phase1 --> phase2 --> gemini --> size --> sheet --> drive
+  sources --> collect --> phase1 --> phase2 --> gemini --> size --> native --> dedupe --> sheet --> drive
 ```
 
 The day-to-day sequence you will actually run is in [action_items.md](../action_items.md). It starts **after** Phase 1, from a `*_validated_cleaned.jsonl` file. Section 4 below walks that sequence in order. Section 3 explains the cleanup each step performs.
@@ -224,7 +226,33 @@ Only ordinary conversational numbers (ordinals, “in the second year”) stay. 
 
 Kept rows go to `{lang}_tts_merged.jsonl`.
 
-### 3.5 Manual QA and Drive export
+### 3.5 Native words, then duplicates
+
+These two steps run after `{lang}_tts_merged.jsonl`, before the review sheet. They do not edit the input file.
+
+`scripts/filter_native_vocabulary_jsonl.py` asks Gemini how many words are English (or another language) spelled in the target script. Latin letters were already removed, so the foreign material looks like `वर्डप्रेस्` or the same kind of spelling in Bengali or Kashmiri script. The share is that count divided by every whitespace-separated word.
+
+| Foreign words / all words | File |
+|---|---|
+| **0.10 or below** | `{stem}_native.jsonl` |
+| **Above 0.10** | `{stem}_foreign.jsonl` |
+| Gemini `PROHIBITED_CONTENT` | `{stem}_foreign.jsonl`, with that reason |
+| Any other API or parse failure | Left out of both files. Re-run with `--resume` |
+
+Pass `--language` (`hindi`, `bengali`, `sanskrit`, `dogri`, `konkani`, `kashmiri`, `nepali`, and the other language names). The default is `sanskrit`. A blocked pair is split and each paragraph is judged alone, so one blocked script does not take its neighbor with it.
+
+`scripts/tts_script_similarity_check.py` then runs on the **native** file. It does not call a model. It compares every paragraph with every other one (TF-IDF cosine gate 0.70, then word Jaccard). An exact copy, or Jaccard at least 0.85, is a duplicate. Jaccard at least 0.60 after the gate is a near duplicate. The first copy is kept.
+
+| File | Contents |
+|---|---|
+| `{stem}_deduped.jsonl` | Kept rows, same fields as the input |
+| `{stem}_deduped_duplicates.jsonl` | Removed copies, plus the kept id and the scores |
+
+The comparison code lives in `scripts/dedupe_similar_tts_jsonl.py`. Run the check script, not that file. It needs `scikit-learn` from `requirements.txt`.
+
+Bengali files sometimes also contain symbols that are not letters (`« »`, `$`, `£`, `@`, `#`, `*`). `scripts/strip_non_bengali_symbols_jsonl.py` deletes those and turns a slash between words into a space. Percent signs, digits, the danda, and normal punctuation stay. Words written in Bengali letters stay, including transliterated names. Run it on the merged or final JSONL before the native-word filter when you see those symbols.
+
+### 3.6 Manual QA and Drive export
 
 `scripts/jsonl_paragraph_to_csv.py` writes `paragraph, word_count` for the sheet. Reviewers work in Google Sheets. Columns you will see on a finished sheet include Script, Edited Script, word count, Did you Edit?, Status, QA Status, QA comments, Injected?, and Unique script IDs (for example `batch3_maithili_script_0001`).
 
@@ -255,8 +283,10 @@ flowchart TD
   s3["3. Gemini verdict on flagged sentences"]
   s4["4. Apply keep/delete onto the jsonl"]
   s5["5. Merge or split to 300–450 words"]
-  s6["6. CSV for the manual-review sheet"]
-  s1 --> s2 --> s3 --> s4 --> s5 --> s6
+  s6["6. Gemini: native words vs foreign words"]
+  s7["7. Drop duplicate paragraphs"]
+  s8["8. CSV for the manual-review sheet"]
+  s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> s7 --> s8
 ```
 
 ### Current pipeline (new or unused data)
@@ -307,14 +337,42 @@ python3 scripts/merge_short_tts_jsonl.py \
   --input new_data_batch3/santali/final_santali_new.jsonl
 ```
 
-**6. Sheet for manual review**
+**6. Drop paragraphs with too many foreign words**
+
+```bash
+python3 scripts/filter_native_vocabulary_jsonl.py \
+  --input new_data_batch3/sanskrit/sanskrit_tts_merged.jsonl \
+  --language sanskrit --workers 8 --batch-size 2
+```
+
+Change `--language` and the path for Hindi, Bengali, Dogri, Konkani, Kashmiri, Nepali, and the other languages. Output is `{stem}_native.jsonl` and `{stem}_foreign.jsonl`. A share of 0.10 is kept. Above that, the row is foreign. `--resume` retries rows that never received a verdict.
+
+**7. Drop duplicate paragraphs from the native file**
+
+```bash
+python3 scripts/tts_script_similarity_check.py \
+  --input new_data_batch3/sanskrit/sanskrit_tts_merged_native.jsonl
+```
+
+Output is `{stem}_deduped.jsonl` (send this onward) and `{stem}_deduped_duplicates.jsonl`.
+
+**8. Sheet for manual review**
 
 ```bash
 python3 scripts/jsonl_paragraph_to_csv.py \
-  --input new_data_batch3/maithili/maithili_tts_merged.jsonl
+  --input new_data_batch3/sanskrit/sanskrit_tts_merged_native_deduped.jsonl
 ```
 
-After reviewers finish, export with `scripts/apps_script_tts_export.gs` (section 3.5).
+After reviewers finish, export with `scripts/apps_script_tts_export.gs` (section 3.6).
+
+Optional, when a Bengali file still has `$`, `« »`, `@`, or `#` mixed into the prose:
+
+```bash
+python3 scripts/strip_non_bengali_symbols_jsonl.py \
+  --input new_data_batch3/bengali/final_bengali_new.jsonl
+```
+
+That writes `{stem}_cleaned.jsonl` and leaves the input in place.
 
 ### Already completed (do not re-run unless you are repairing a review)
 
@@ -375,7 +433,10 @@ Run Python from the repo root with the venv active (`source .venv/bin/activate`)
 | `scripts/segment_cleanup_verdict.py` | Gemini Batch keep / delete / review per flagged sentence | Action item 3 |
 | `scripts/apply_gemini_review_jsonl.py` | Copy verdicts onto the cleaned JSONL | Action item 4 |
 | `scripts/merge_short_tts_jsonl.py` | Merge, trim, and split into the 300–450 word band | Action item 5 |
-| `scripts/jsonl_paragraph_to_csv.py` | `paragraph` + `word_count` CSV for the review sheet | Action item 6 |
+| `scripts/filter_native_vocabulary_jsonl.py` | Gemini count of foreign words written in the target script. Reject when that count is more than 10% of all words. `PROHIBITED_CONTENT` goes to the foreign file | Action item 6, after `{lang}_tts_merged.jsonl`. Needs `--language` |
+| `scripts/tts_script_similarity_check.py` | Drop exact and near-duplicate paragraphs. No model. Calls `dedupe_similar_tts_jsonl.py` | Action item 7. Input is the native JSONL from the step above |
+| `scripts/strip_non_bengali_symbols_jsonl.py` | Delete non-Bengali symbols (`$`, `« »`, `@`, `#`, `*`) and turn `/` into a space | A Bengali JSONL still has those marks. Does not remove transliterated words |
+| `scripts/jsonl_paragraph_to_csv.py` | `paragraph` + `word_count` CSV for the review sheet | Action item 8. Input is `{stem}_deduped.jsonl` |
 | `scripts/clean_tts_nsw_jsonl.py` | Older TTS pass: same regex family, and it also resizes to 300–450 in one step (`*_tts_cleaned.jsonl`, plus short / overflow / dropped files) | A language that was finished on the old Phase 2 path. New work uses `clean_tts_new_jsonl.py` plus `merge_short_tts_jsonl.py` instead |
 
 ### Review of scripts that are already complete
@@ -449,7 +510,8 @@ Put `GEMINI_API_KEY=...` in `.env` at the repo root. The fastText model (`lid.17
 ## 7. Practical notes
 
 - Do not merge text across sources. Packing, short-script merge, and the sheet all assume one `source` (and, at merge time, one `domain`).
-- Phase 1 drops low-coherence and high-sensitivity rows. Phase 2 Gemini `Review` and `Delete` drop **sentences**, not always the whole script.
+- Phase 1 drops low-coherence and high-sensitivity rows. Phase 2 Gemini `Review` and `Delete` drop **sentences**, not always the whole script. The native-word filter drops the **whole paragraph** when foreign words are more than 10% of all words, and also when Gemini blocks the row as `PROHIBITED_CONTENT`.
+- The duplicate check keeps the first copy. It does not look at `source` and does not call Gemini. Run it on `{stem}_native.jsonl`, not on the merged file, or the deduped output still contains the foreign-word rows.
 - `clean_tts_new_jsonl.py` does not overwrite its input. `filter_coherence.py`, `tag_domains.py`, and `remove_latin_words_jsonl.py --in-place` do.
 - Word targets are not the same at every stage. Collection default is 500 and drops the tail. Phase 1 via `run_validation_pipeline.py` keeps 300–450 and splits only above 1000. The recording step (`merge_short_tts_jsonl.py`) keeps 300–450 and splits above 600.
 - Apps Script exports use **Edited Script** whenever it is non-empty. An accepted row with an empty Edited Script is skipped and not marked Injected.

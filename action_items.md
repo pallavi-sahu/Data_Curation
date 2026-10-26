@@ -15,8 +15,26 @@
 # merging or splitting two rows of same domain and source to make sure each paragraph has 300-450 words
 3. python3 scripts/merge_short_tts_jsonl.py --input new_data_batch3/santali/final_santali_new.jsonl
 
+
+# native words: reject when foreign words are more than 10% of all words.
+# Writes {stem}_native.jsonl and {stem}_foreign.jsonl.
+# PROHIBITED_CONTENT goes to the foreign file. Other API failures stay out; rerun with --resume.
+python3 scripts/filter_native_vocabulary_jsonl.py \
+  --input new_data_batch3/sanskrit/sanskrit_tts_merged.jsonl \
+  --language sanskrit --workers 8 --batch-size 2
+
+# duplicate check on the native file (no model).
+# Writes {stem}_deduped.jsonl and {stem}_deduped_duplicates.jsonl.
+python3 scripts/tts_script_similarity_check.py \
+  --input new_data_batch3/sanskrit/sanskrit_tts_merged_native.jsonl
+
+# optional, Bengali only: strip $, « », @, #, * and turn / into a space.
+# Does not remove words that are already written in Bengali letters.
+# python3 scripts/strip_non_bengali_symbols_jsonl.py \
+#   --input new_data_batch3/bengali/final_bengali_new.jsonl
+
 # creating csv file from final dataset for manual review
-4. python3 scripts/jsonl_paragraph_to_csv.py --input new_data_batch3/maithili/maithili_tts_merged.jsonl
+4. python3 scripts/jsonl_paragraph_to_csv.py --input new_data_batch3/sanskrit/sanskrit_tts_merged_native_deduped.jsonl
 
 
 
